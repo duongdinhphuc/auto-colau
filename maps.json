@@ -32,5 +32,13 @@
         "image": ""
       }
     ]
+  },
+  "Hồng Giang": {
+    "monsters": [
+      {
+        "name": "Hỏa hầu",
+        "level": null
+      }
+    ]
   }
 }

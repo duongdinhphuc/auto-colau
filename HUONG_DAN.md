@@ -50,6 +50,7 @@ Mỗi lần bấm **Chụp** hoặc **Chọn**, màn hình sẽ đứng hình đ
 - Phóng to cửa sổ game: chữ càng to thì đọc càng chuẩn.
 - Mở `config.json` và tăng `ocr_scale` (3 → 4).
 - Nếu tên quái không phải chữ trắng, giảm `ocr_white_v` (185 → 150).
+- Không nhận ra map: bot đọc riêng ô tên map ở góc trên-phải (25% bên phải, 12% phía trên). Nếu giao diện khác, thêm `"map_region": [x1, y1, x2, y2]` (toạ độ trong cửa sổ game) vào `config.json`.
 - Nếu bot hay nhận nhầm tên quái này thành quái khác, tăng `name_match` (0.72 → 0.8).
 
 ## Lưu ý

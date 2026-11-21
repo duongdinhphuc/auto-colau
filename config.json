@@ -30,13 +30,14 @@
     "giot"
   ],
   "gem_priority": {
-    "kiem": 10,
-    "amduong": 9,
+    "kiem": 30,
+    "amduong": 10,
     "tim": 8,
     "dao": 7,
     "sao": 6,
     "vang": 5,
-    "giot": 5
+    "giot": 5,
+    "kiem_do": 20
   },
   "hp_bar": [
     208,
@@ -61,11 +62,12 @@
     "speed_px_per_s": 250
   },
   "auto": {
-    "map": "Trại Vân Sơn",
+    "map": "Hồng Giang",
     "selected": {
       "Trại Vân Sơn": [
         "Cua Càng"
-      ]
+      ],
+      "Hồng Giang": []
     },
     "skill": 1,
     "use_potion": true,

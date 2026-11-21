@@ -945,9 +945,42 @@ class Bot:
         hits = [h for h in hits if not (h[0] < W * 0.3 and h[1] < H * 0.15)]
         return max(hits, key=lambda h: h[1])[:2] if hits else None
 
+    def map_label_lines(self, screen):
+        """Đọc riêng ô tên map ở góc trên-phải (chữ trắng trên nền xanh đậm).
+        Vùng mặc định: 25% bên phải, 12% phía trên; đổi bằng 'map_region' [x1, y1, x2, y2] trong config."""
+        if self.ocr.ok is None:
+            self.ocr.setup(self.cfg)
+        if not self.ocr.ok:
+            return []
+        H, W = screen.shape[:2]
+        x1, y1, x2, y2 = self.cfg.get("map_region") or [int(W * 0.75), 0, W, int(H * 0.12)]
+        crop = screen[max(0, y1):min(H, y2), max(0, x1):min(W, x2)]
+        if crop.size == 0:
+            return []
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        g = 255 - cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        lines = []
+        for psm in (11, 6):
+            t = self.ocr.pt.image_to_string(g, lang=self.ocr.lang, config=f"--psm {psm}")
+            lines += [norm_text(l) for l in t.splitlines() if norm_text(l)]
+        return lines
+
     def detect_map(self, screen, words=None):
-        words = self.read_words(screen) if words is None else words
+        # 1) đọc riêng ô tên map góc trên-phải (chính xác hơn đọc cả màn hình)
         best, bv = None, 0
+        lines = self.map_label_lines(screen)
+        for name in self.maps:
+            target = norm_text(name)
+            for line in lines:
+                r = difflib.SequenceMatcher(None, line, target).ratio()
+                if target in line:
+                    r = max(r, 0.95)
+                if r >= 0.75 and r > bv:
+                    best, bv = name, r
+        if best:
+            return best
+        # 2) dự phòng: tìm trong chữ đọc được trên cả màn hình
+        words = self.read_words(screen) if words is None else words
         for name in self.maps:
             for _, _, r in OCR.find_name(words, name, 0.7):
                 if r > bv:

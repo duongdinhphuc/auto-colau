@@ -1,0 +1,86 @@
+{
+  "window_title": "Cờ Lau Loạn Thế",
+  "match_threshold": 0.85,
+  "monster_threshold": 0.8,
+  "click_jitter_px": 3,
+  "delay_after_move": 1.0,
+  "stuck_seconds": 60,
+  "extra_turn_len": 4,
+  "board": {
+    "top_left": [
+      417,
+      166
+    ],
+    "bottom_right": [
+      864,
+      613
+    ],
+    "rows": 8,
+    "cols": 8,
+    "gem_threshold": 0.55,
+    "move_style": "drag"
+  },
+  "gems": [
+    "dao",
+    "tim",
+    "vang",
+    "sao",
+    "kiem",
+    "amduong",
+    "giot"
+  ],
+  "gem_priority": {
+    "kiem": 10,
+    "amduong": 9,
+    "tim": 8,
+    "dao": 7,
+    "sao": 6,
+    "vang": 5,
+    "giot": 5
+  },
+  "hp_bar": [
+    208,
+    183,
+    388,
+    202
+  ],
+  "energy_bar": [
+    208,
+    204,
+    389,
+    218
+  ],
+  "energy_color": "blue",
+  "energy_full": 0.95,
+  "move": {
+    "key_left": "left",
+    "key_right": "right",
+    "key_attack": null,
+    "monster_click_offset_y": 35,
+    "walk_wait": 2.5,
+    "speed_px_per_s": 250
+  },
+  "auto": {
+    "map": "Trại Vân Sơn",
+    "selected": {
+      "Trại Vân Sơn": [
+        "Cua Càng"
+      ]
+    },
+    "skill": 1,
+    "use_potion": true,
+    "potion_hp": 30,
+    "max_lose_streak": 2,
+    "max_minutes": 120,
+    "max_battles": 0
+  },
+  "player_name": "phucdd",
+  "tesseract_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+  "ocr_lang": "vie",
+  "ocr_scale": 3,
+  "name_match": 0.72,
+  "window_size": [
+    1280,
+    720
+  ]
+}

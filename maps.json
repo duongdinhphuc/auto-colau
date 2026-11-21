@@ -1,0 +1,36 @@
+{
+  "Trại Vân Sơn": {
+    "monsters": [
+      {
+        "name": "Heo Mọi",
+        "level": 7,
+        "image": ""
+      },
+      {
+        "name": "Sơn Tặc",
+        "level": 9,
+        "image": ""
+      },
+      {
+        "name": "Sói Xám",
+        "level": 11,
+        "image": ""
+      },
+      {
+        "name": "Cóc Xanh",
+        "level": 13,
+        "image": ""
+      },
+      {
+        "name": "Cua Càng",
+        "level": 15,
+        "image": ""
+      },
+      {
+        "name": "Kẻ Quấy Phá",
+        "level": 20,
+        "image": ""
+      }
+    ]
+  }
+}

@@ -31,7 +31,7 @@ UI_TEMPLATES = [
     ("thua.png", "Chữ 'THUA' ở bảng kết quả", False),
     ("ky_nang.png", "Nút 'Kỹ năng' trong trận", False),
     ("tui_do.png", "Nút 'Túi đồ' trong trận", False),
-    ("binh_mau.png", "Bình máu trong túi đồ", False),
+    ("binh_mau.png", "Bình máu trong túi đồ (không cần nữa)", False),
     ("luot_doi_thu.png", "Chữ 'Lượt của đối thủ'", False),
     ("thang.png", "Một đoạn cầu thang trên map (để leo lên/xuống tầng)", False),
 ]
@@ -536,6 +536,21 @@ class App:
                           state="readonly")
         cb.grid(row=1, column=3)
         cb.bind("<<ComboboxSelected>>", lambda e: self._set(self.cfg, "energy_color", self.en_color.get()))
+        ttk.Label(g, text="Dùng kỹ năng khi nội lực đạt (% thanh):").grid(row=2, column=0, columnspan=2,
+                                                                       sticky="w")
+        # giữ biến trên self: biến Tk cục bộ bị thu hồi -> ô số hiện trống
+        self.need_var = need = tk.IntVar(value=int(round(B.energy_need(self.cfg) * 100)))
+
+        def set_need(*_):
+            try:
+                self._set(self.cfg, "energy_need", max(1, min(100, int(need.get()))) / 100)
+            except (tk.TclError, ValueError):
+                pass
+        sp = ttk.Spinbox(g, from_=5, to=100, width=4, textvariable=need, command=set_need)
+        sp.grid(row=2, column=2, sticky="w")
+        sp.bind("<FocusOut>", set_need)
+        ttk.Label(g, text="26 = hết khúc đầu; 100 = đầy thanh", foreground="gray").grid(
+            row=3, column=0, columnspan=4, sticky="w")
 
         # nút giao diện
         g = ttk.LabelFrame(f, text="4. Ảnh mẫu các nút (cắt sát nút)", padding=6)
@@ -543,9 +558,11 @@ class App:
         for i, (fn, desc, need) in enumerate(UI_TEMPLATES):
             s, c = ok(os.path.exists(P_ui(fn)))
             ttk.Label(g, text=s, foreground=c if (need or s == "✔") else "gray").grid(row=i, column=0)
-            ttk.Label(g, text=desc + ("" if need else " (tuỳ chọn)")).grid(row=i, column=1, sticky="w")
+            # nút "Chụp" đứng trước mô tả: mô tả dài không đẩy nút ra ngoài cửa sổ
             ttk.Button(g, text="Chụp", width=6,
-                       command=lambda n=fn, d=desc: self.capture_ui(n, d)).grid(row=i, column=2, padx=4)
+                       command=lambda n=fn, d=desc: self.capture_ui(n, d)).grid(row=i, column=1, padx=4)
+            ttk.Label(g, text=desc + ("" if need else " (tuỳ chọn)"), wraplength=330,
+                      justify="left").grid(row=i, column=2, sticky="w")
 
         # di chuyển
         g = ttk.LabelFrame(f, text="5. Di chuyển trên map", padding=6)

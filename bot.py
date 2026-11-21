@@ -67,6 +67,69 @@ def imwrite(path, img):
     return ok
 
 
+# =================================================================== bàn phím
+# Game dùng GLFW: GLFW nhận phím theo mã vật lý (scancode). pyautogui gửi scancode = 0,
+# GLFW tự đoán ra phím số bên phải (numpad) thay vì phím mũi tên -> nhân vật không đi.
+# Vì vậy gửi phím bằng SendInput kèm scancode, phím mở rộng (mũi tên...) có cờ EXTENDED.
+class _KI(ctypes.Structure):
+    _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _MI(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _IU(ctypes.Union):
+    _fields_ = [("ki", _KI), ("mi", _MI)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("u", _IU)]
+
+
+_EXTENDED_VK = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B, 0x5C, 0x6F, 0xA3, 0xA5}
+
+
+def _vk(key):
+    key = str(key).lower()
+    try:
+        from pyautogui import _pyautogui_win
+        vk = _pyautogui_win.keyboardMapping.get(key)
+        if vk:
+            return vk & 0xFF
+    except Exception:
+        pass
+    if len(key) == 1:
+        vk = ctypes.windll.user32.VkKeyScanW(ord(key))
+        if vk != -1:
+            return vk & 0xFF
+    raise ValueError(f"Không biết phím '{key}'")
+
+
+def _send_key(key, up):
+    vk = _vk(key)
+    user32 = ctypes.windll.user32
+    flags = (0x0001 if vk in _EXTENDED_VK else 0) | (0x0002 if up else 0)
+    inp = _INPUT(1, _IU(ki=_KI(vk, user32.MapVirtualKeyW(vk, 0), flags, 0, 0)))
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
+def key_down(key):
+    _send_key(key, False)
+
+
+def key_up(key):
+    _send_key(key, True)
+
+
+def key_press(key):
+    _send_key(key, False)
+    time.sleep(0.03)
+    _send_key(key, True)
+
+
 # =================================================================== cửa sổ game
 class GameWindow:
     def __init__(self):
@@ -141,11 +204,28 @@ class GameWindow:
             user32 = ctypes.windll.user32
             if user32.GetForegroundWindow() == self.hwnd:
                 return True
-            # Windows chặn SetForegroundWindow nếu không có phím vừa bấm -> gõ nhẹ Alt trước
-            user32.keybd_event(0x12, 0, 0, 0)
-            user32.keybd_event(0x12, 0, 2, 0)
-            user32.SetForegroundWindow(self.hwnd)
+            # KHÔNG gõ Alt: Alt nhả ra khi game đã lên trên sẽ làm game vào chế độ menu cửa sổ,
+            # phím mũi tên khi đó không tới được game. Dùng AttachThreadInput thay thế.
+            kernel32 = ctypes.windll.kernel32
+            fg = user32.GetForegroundWindow()
+            cur = kernel32.GetCurrentThreadId()
+            other = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            attached = bool(other and other != cur and user32.AttachThreadInput(cur, other, True))
+            try:
+                user32.BringWindowToTop(self.hwnd)
+                user32.SetForegroundWindow(self.hwnd)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(cur, other, False)
             time.sleep(0.1)
+            if user32.GetForegroundWindow() == self.hwnd:
+                return True
+            # vẫn không được -> bấm chuột vào thanh tiêu đề game (không ảnh hưởng gì trong game)
+            x, y, w, h = self.offset
+            old = pyautogui.position()
+            pyautogui.click(x + w // 2, max(0, y - 12))
+            pyautogui.moveTo(*old)
+            time.sleep(0.15)
             return user32.GetForegroundWindow() == self.hwnd
         except Exception:
             return False
@@ -353,6 +433,13 @@ def gem_names(cfg):
     return list(cfg["gems"]) + [k for k in gem_aliases(cfg) if k not in cfg["gems"]]
 
 
+def energy_need(cfg):
+    """Nội lực tối thiểu để dùng kỹ năng (tỉ lệ vùng energy_bar). Thanh chia 4 khúc, chỉ cần hết
+    khúc đầu (~26% vùng đã chọn) là dùng được. Khoá mới 'energy_need' (khoá cũ 'energy_full'
+    0.95 = đợi đầy thanh, không dùng nữa)."""
+    return cfg.get("energy_need", 0.26)
+
+
 def special_bonus(cfg, cells):
     """cells: {(r, c): tên viên đặc biệt} -> {(r, c): điểm cộng}."""
     pri = cfg.get("gem_priority", {})
@@ -470,6 +557,10 @@ def best_raw(grid, priority, extra_len):
     return best
 
 
+# Điểm cộng theo tầng: lớn hơn hẳn mọi điểm khác -> ăn 5 > ăn 4 > ăn 3, bất kể loại viên
+TIER_BONUS = {5: 20000, 4: 10000}
+
+
 def best_move(grid, priority=None, extra_len=4, extra_bonus=80, look_ahead=0.4, exclude=(),
               special=None):
     """Chọn nước đi: ưu tiên ăn 4+ (được thêm lượt), trừ điểm nếu để lại nước ngon cho đối thủ.
@@ -498,6 +589,10 @@ def best_move(grid, priority=None, extra_len=4, extra_bonus=80, look_ahead=0.4, 
             s += extra_bonus
         elif look_ahead:
             s -= look_ahead * best_raw(after, priority, extra_len)
+        # Luôn ưu tiên nước ăn 5+ rồi 4, sau đó mới tới thứ tự ưu tiên viên.
+        # Chỉ tính cụm ăn được ngay bằng nước này (viên rơi xuống sau đó chưa biết trước).
+        big = max((n for n, _ in find_matches(g)[1]), default=0)
+        s += TIER_BONUS.get(min(big, 5), 0)
         if best is None or s > best_s:
             best, best_s = ((r1, c1), (r2, c2)), s
     return best, best_s
@@ -580,11 +675,11 @@ class Bot:
 
     def hold_key(self, key, seconds):
         self.ensure_focus()
-        pyautogui.keyDown(key)
+        key_down(key)
         try:
             self.sleep(seconds, seconds)
         finally:
-            pyautogui.keyUp(key)
+            key_up(key)
 
     # ---------------------------------------------------------- bàn cờ
     def cell_rects(self):
@@ -809,8 +904,21 @@ class Bot:
             m = colored & (h > 90) & (h < 130)
         else:
             m = colored
-        cols = np.where(m.mean(axis=0) > 0.3)[0]
-        return 0.0 if cols.size == 0 else (cols[-1] + 1) / (x2 - x1)
+        on = m.mean(axis=0) > 0.3
+        # đi từ trái sang: phần đã đầy là đoạn có màu liền mạch (cho phép vạch chia mảnh <= 5px).
+        # Không lấy cột có màu xa nhất: viền khung bên phải cũng có màu -> thanh luôn bị tính là đầy.
+        first = np.argmax(on) if on.any() else -1
+        if first < 0 or first > (x2 - x1) * 0.25:
+            return 0.0
+        end, gap = first, 0
+        for i in range(first, len(on)):
+            if on[i]:
+                end, gap = i, 0
+            else:
+                gap += 1
+                if gap > 5:
+                    break
+        return (end + 1) / (x2 - x1)
 
     # ---------------------------------------------------------- trong trận
     def in_battle(self, screen):
@@ -819,21 +927,21 @@ class Bot:
     def confirm_use(self):
         """Game không có nút 'Dùng': chọn bình / kỹ năng xong thì bấm Enter để dùng."""
         self.sleep(0.2, 0.3)
-        pyautogui.press(self.cfg["move"].get("key_use", "enter") or "enter")
+        key_press(self.cfg["move"].get("key_use", "enter") or "enter")
         self.sleep(0.4)
 
     def use_potion(self):
+        """Mở túi đồ: game đã chọn sẵn bình máu (Hoàn Linh Dược) -> chỉ cần bấm Enter.
+        KHÔNG bấm vào bình: ảnh mẫu bình máu dễ khớp nhầm sang bình mana (Kim Đan Dược).
+        Trả về True nếu đã dùng."""
         s = self.win.grab()
         if not self.click_tpl(s, "ui/tui_do.png", 0.8):
-            self.log("[!] Không thấy nút Túi đồ")
-            return
-        s = self.win.grab()
-        if self.click_tpl(s, "ui/binh_mau.png", 0.6):
-            self.confirm_use()
-            self.log("  + Dùng bình máu")
-        else:
-            self.log("[!] Không thấy bình máu trong túi")
-            pyautogui.press("esc")
+            # lượt đối thủ: nút Túi đồ bị mờ -> chờ tới lượt mình
+            return False
+        self.sleep(0.5, 0.6)
+        self.confirm_use()
+        self.log("  + Dùng bình máu (Enter)")
+        return True
 
     def use_skill(self, idx):
         s = self.win.grab()
@@ -844,7 +952,7 @@ class Bot:
             self.log(f"  + Dùng kỹ năng {idx}")
         else:
             self.log(f"[!] Không thấy kỹ năng {idx}")
-            pyautogui.press("esc")
+            key_press("esc")
 
     def battle_turn(self):
         cfg = self.cfg
@@ -875,14 +983,15 @@ class Bot:
         hp = self.bar_fill(screen, cfg.get("hp_bar"), "red")
         if ui.get("use_potion") and hp is not None and hp * 100 < ui.get("potion_hp", 30) \
                 and time.time() - getattr(self, "_last_potion", 0) > 8:
-            self._last_potion = time.time()
-            self.log(f"  HP còn ~{hp * 100:.0f}%")
-            self.use_potion()
-            return
+            if self.use_potion():
+                self._last_potion = time.time()
+                self.log(f"  HP còn ~{hp * 100:.0f}%")
+                return
+            # không mở được túi đồ (nút mờ / không thấy) -> vẫn đi nước bình thường
         sk = ui.get("skill", 0)
         if sk:
             en = self.bar_fill(screen, cfg.get("energy_bar"), cfg.get("energy_color", "any"))
-            if en is not None and en >= cfg.get("energy_full", 0.95) \
+            if en is not None and en >= energy_need(cfg) \
                     and time.time() - getattr(self, "_last_skill", 0) > 5:
                 self._last_skill = time.time()
                 self.use_skill(sk)
@@ -942,8 +1051,52 @@ class Bot:
         hits = OCR.find_name(words, name, max(0.8, self.cfg.get("name_match", 0.72)), max_len_diff=1)
         # bỏ tên ở khung thông tin góc trên-trái, chỉ lấy tên trên đầu nhân vật
         H, W = screen.shape[:2]
+        if not hits:
+            # tên bị dính với tên người chơi đứng sát (vd "phucddVaK") -> tìm tên mình nằm trong từ
+            target = norm_text(name).replace(" ", "")
+            if len(target) >= 4:
+                for t, x1, y1, x2, y2 in words:
+                    text = norm_text(t).replace(" ", "")
+                    i = text.find(target)
+                    if i >= 0 and len(text) > len(target):
+                        cx = x1 + (x2 - x1) * (i + len(target) / 2) / len(text)
+                        hits.append((int(cx), (y1 + y2) // 2, 0.9))
         hits = [h for h in hits if not (h[0] < W * 0.3 and h[1] < H * 0.15)]
-        return max(hits, key=lambda h: h[1])[:2] if hits else None
+        if hits:
+            me = max(hits, key=lambda h: h[1])[:2]
+        else:
+            me = self.cyan_name_pos(screen, len(norm_text(name).replace(" ", "")))
+        if me:
+            self._last_me = (me, time.time())
+        return me
+
+    def cyan_name_pos(self, screen, n_chars):
+        """Dự phòng khi OCR đọc sai tên (bị chồng chữ với người khác): tên mình là dòng chữ
+        màu xanh ngọc duy nhất, tên người khác màu trắng. Tìm cụm chữ cyan dài cỡ tên mình."""
+        H, W = screen.shape[:2]
+        hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
+        m = ((hsv[..., 0] >= 78) & (hsv[..., 0] <= 100) & (hsv[..., 1] > 60) &
+             (hsv[..., 2] > 130)).astype(np.uint8) * 255
+        m[:int(H * 0.15), :int(W * 0.3)] = 0  # khung thông tin góc trên-trái
+        m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3)))
+        n, _, st, _ = cv2.connectedComponentsWithStats(m)
+        cands = []
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            if n_chars * 6 <= w <= n_chars * 13 + 10 and 8 <= h <= 22 and a >= 0.45 * w * h:
+                cands.append((int(x + w / 2), int(y + h / 2)))
+        if not cands:
+            return None
+        # camera đi theo nhân vật: ưu tiên chỗ vừa thấy nhân vật, không có thì gần giữa màn hình
+        ref, t = getattr(self, "_last_me", (None, 0))
+        if not ref or time.time() - t > 30:
+            ref = (W // 2, int(H * 0.45))
+        return min(cands, key=lambda p: abs(p[0] - ref[0]) + abs(p[1] - ref[1]))
+
+    def recent_player_pos(self, seconds=4):
+        """Vị trí nhân vật đọc được gần nhất (nếu chưa quá 'seconds' giây) - dùng khi tên bị che."""
+        me, t = getattr(self, "_last_me", (None, 0))
+        return me if me and time.time() - t <= seconds else None
 
     def map_label_lines(self, screen):
         """Đọc riêng ô tên map ở góc trên-phải (chữ trắng trên nền xanh đậm).
@@ -999,7 +1152,7 @@ class Bot:
         """Bấm đánh ngay, không chờ. Vị trí nút đánh được nhớ lại (tìm lại sau mỗi 30 giây)."""
         key = self.cfg["move"].get("key_attack")
         if key:
-            pyautogui.press(key)
+            key_press(key)
             return
         pos, t = getattr(self, "_atk", (None, 0))
         if pos is None or time.time() - t > 30:
@@ -1033,6 +1186,10 @@ class Bot:
             return False
         mv = self.cfg["move"]
         self.log(f"-> Tìm thấy {target[2]}, tiến tới đánh")
+        if not me:
+            me = self.recent_player_pos()
+            if me:
+                self.log("  Tên nhân vật bị che, dùng vị trí vừa thấy")
 
         if not me or not mv.get("key_left"):
             # không biết nhân vật ở đâu / không có phím đi -> bấm vào quái rồi bấm nút đánh
@@ -1085,6 +1242,16 @@ class Bot:
                     self.log("  Quái ở tầng trên, nhảy lên")
                     long_walk = True
                     self.walk(1 if dx > 0 else -1, 0.5, jump=True)
+                elif abs(dx) > near_x:
+                    # quái ở chỗ thấp hơn nhưng còn xa theo chiều ngang -> cứ đi về phía quái:
+                    # đường dốc sẽ dẫn xuống, hoặc tới mép thì rơi xuống
+                    self.log(f"  Quái ở chỗ thấp hơn, đi {'phải' if dx > 0 else 'trái'} về phía quái "
+                             f"(còn cách {abs(dx)}px)")
+                    t = (abs(dx) - near_x / 2) / speed
+                    long_walk = t >= 0.4
+                    direction = 1 if dx > 0 else -1
+                    if self.walk(direction, t, attack=abs(dx) <= mv.get("attack_spam_px", 300)):
+                        return True
                 else:
                     # Cách 2: quái ở tầng dưới, không thấy thang -> đi ra mép để rơi xuống
                     searching_edge = True
@@ -1092,7 +1259,7 @@ class Bot:
                     long_walk = True
                     self.walk(direction, 0.5)
                     if vkey:
-                        pyautogui.press(vkey)
+                        key_press(vkey)
             self.sleep(0.2, 0.3)
 
             screen = self.win.grab()
@@ -1112,7 +1279,12 @@ class Bot:
             if not me:
                 self.log("  Không thấy tên nhân vật (bị che?), dùng vị trí cũ")
                 me = prev
-            if long_walk and abs(me[0] - prev[0]) + abs(me[1] - prev[1]) < 5:
+            # camera đi theo nhân vật -> vị trí nhân vật trên màn hình gần như đứng yên khi đi.
+            # Coi là "kẹt" chỉ khi cả vị trí nhân vật lẫn khoảng cách tới quái đều không đổi.
+            moved_me = abs(me[0] - prev[0]) + abs(me[1] - prev[1])
+            moved_rel = abs((target[0] - me[0]) - (last[0] - prev[0])) + \
+                abs((target[1] - me[1]) - (last[1] - prev[1]))
+            if long_walk and moved_me < 5 and moved_rel < 8:
                 stuck += 1
                 if searching_edge:
                     direction = -direction  # đụng tường -> quay lại tìm mép bên kia
@@ -1130,7 +1302,7 @@ class Bot:
         key = mv["key_right"] if direction > 0 else mv["key_left"]
         end = time.time() + mv.get("charge_seconds", 1.5)
         self.ensure_focus()
-        pyautogui.keyDown(key)
+        key_down(key)
         try:
             while time.time() < end:
                 self.press_attack()
@@ -1138,7 +1310,7 @@ class Bot:
                 if self.in_battle(self.win.grab()):
                     return True
         finally:
-            pyautogui.keyUp(key)
+            key_up(key)
         return self.try_attack(target)
 
     def try_attack(self, target):
@@ -1159,11 +1331,11 @@ class Bot:
         seconds = max(0.15, min(1.0, seconds))
         self.ensure_focus()
         end = time.time() + seconds
-        pyautogui.keyDown(key)
+        key_down(key)
         try:
             if jump and mv.get("key_up", "up"):
                 self.sleep(0.1, 0.1)
-                pyautogui.press(mv.get("key_up", "up"))
+                key_press(mv.get("key_up", "up"))
             while attack and time.time() < end - 0.1:
                 self.press_attack()
                 if self.in_battle(self.win.grab()):
@@ -1172,7 +1344,7 @@ class Bot:
             rest = max(0.0, end - time.time())
             self.sleep(rest, rest)
         finally:
-            pyautogui.keyUp(key)
+            key_up(key)
         return False
 
     def find_ladder(self, screen, me, target):
@@ -1218,15 +1390,23 @@ class Bot:
                 idle = time.time()
                 continue
 
-            # popup kết quả trận
-            if self.tpl.find(screen, "ui/dong.png", self.th):
+            # popup kết quả trận. Ngưỡng nút Đóng thấp hơn ngưỡng chung: ảnh mẫu dính nền bản đồ
+            # phía sau nút (thay đổi theo chỗ đứng) nên chỉ khớp ~0.82-0.86.
+            close_th = self.cfg.get("close_threshold", 0.7)
+            close_pos = self.tpl.find(screen, "ui/dong.png", close_th)
+            lost = bool(self.tpl.find(screen, "ui/thua.png", 0.8))
+            if close_pos or lost:
                 if was_battle:
-                    lost = bool(self.tpl.find(screen, "ui/thua.png", 0.7))
                     self.stats["losses" if lost else "wins"] += 1
                     self.stats["lose_streak"] = self.stats["lose_streak"] + 1 if lost else 0
                     self.log("  => THUA" if lost else "  => Thắng")
                 was_battle = False
-                self.click_tpl(screen, "ui/dong.png", 1.0)
+                if close_pos:
+                    self.click(close_pos[0], close_pos[1])
+                    self.log("  Bấm nút Đóng")
+                else:
+                    key_press("esc")  # thấy chữ THUA mà không thấy nút Đóng -> thử Esc
+                self.sleep(1.0)
                 idle = time.time()
                 r = self.stop_reason()
                 if r:
@@ -1246,7 +1426,7 @@ class Bot:
 
             if time.time() - idle > self.cfg.get("stuck_seconds", 60):
                 self.log("[!] Lâu không thấy quái/nút nào. Nhấn ESC và đi dạo một chút...")
-                pyautogui.press("esc")
+                key_press("esc")
                 mv = self.cfg["move"]
                 if mv.get("key_left"):
                     self.hold_key(random.choice([mv["key_left"], mv["key_right"]]), 1.0)

@@ -31,13 +31,13 @@
   ],
   "gem_priority": {
     "kiem": 30,
-    "amduong": 10,
-    "tim": 8,
-    "dao": 7,
-    "sao": 6,
-    "vang": 5,
-    "giot": 5,
-    "kiem_do": 20
+    "kiem_do": 20,
+    "tim": 10,
+    "amduong": 9,
+    "dao": 8,
+    "sao": 7,
+    "vang": 6,
+    "giot": 5
   },
   "hp_bar": [
     208,
@@ -67,7 +67,9 @@
       "Trại Vân Sơn": [
         "Cua Càng"
       ],
-      "Hồng Giang": []
+      "Hồng Giang": [
+        "Hỏa hầu"
+      ]
     },
     "skill": 1,
     "use_potion": true,

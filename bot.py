@@ -4,6 +4,7 @@ Lõi auto Cờ Lau Loạn Thế (PC Windows) - phần chơi đơn: đánh quái 
 Mọi toạ độ lưu trong config.json đều tính theo VÙNG TRONG CỬA SỔ GAME.
 """
 import ctypes
+import collections
 import difflib
 import json
 import unicodedata
@@ -386,6 +387,57 @@ def cyan_mask(hsv, cfg):
             (hsv[..., 2] > cfg.get("ocr_cyan_v", OCR_CYAN_V)))
 
 
+def scroll_shift(before, after, y):
+    """Cảnh dịch bao nhiêu px giữa 2 ảnh ('y' = dòng tên nhân vật). Camera đi theo nhân vật nên
+    cảnh đứng yên = nhân vật không đi được (vướng bậc/tường). Đo bằng 2 mảng cảnh hai bên nhân vật
+    (bỏ phần giữa: nhân vật luôn đứng giữa màn hình và có hoạt ảnh, làm phép đo ra 'không dịch' sai,
+    nhất là ban đêm khi nền tối ít chi tiết). Lấy mảng khớp tốt hơn.
+    Trả về (dx, dy, độ_khớp) hoặc None nếu cả 2 mảng đều trơn quá (trời/nước) không đo được.
+    Đã thử ngày + đêm: đứng yên/vướng ~1.0, đang đi đo đúng quãng dịch."""
+    H, W = before.shape[:2]
+    y1 = int(min(H - 100, max(0, y + 15)))
+    y2 = y1 + 90
+    best = None
+    for x1, x2 in ((int(W * 0.15), int(W * 0.44)), (int(W * 0.56), int(W * 0.85))):
+        ga = cv2.cvtColor(before[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+        if ga.std() < 10:
+            continue
+        sy1, sy2 = max(0, y1 - 150), min(H, y2 + 150)
+        sx1, sx2 = max(0, x1 - 400), min(W, x2 + 400)
+        gc = cv2.cvtColor(after[sy1:sy2, sx1:sx2], cv2.COLOR_BGR2GRAY)
+        r = cv2.matchTemplate(gc, ga, cv2.TM_CCOEFF_NORMED)
+        _, v, _, loc = cv2.minMaxLoc(r)
+        if best is None or v > best[2]:
+            best = (loc[0] + sx1 - x1, loc[1] + sy1 - y1, v)
+    return best
+
+
+def attack_markers(screen):
+    """Dấu ▼ đỏ viền trắng, ruột vàng (~32x23px) game vẽ trên đầu con quái đang ở trong tầm đánh,
+    phía trước mặt nhân vật. Có dấu này thì bấm nút Đánh là vào trận. Dò theo màu nên không phụ
+    thuộc nền map / theme ngày đêm. Trả về list (x, y) tâm dấu."""
+    H, W = screen.shape[:2]
+    hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    red = (((h < 8) | (h > 172)) & (s > 150) & (v > 150)).astype(np.uint8)
+    yel = (h >= 18) & (h <= 34) & (s > 150) & (v > 180)
+    n, _, st, _ = cv2.connectedComponentsWithStats(red)
+    out = []
+    for i in range(1, n):
+        x, y, w, hh, _ = st[i]
+        if not (18 <= w <= 42 and 12 <= hh <= 32) or y < H * 0.12 or y > H * 0.85:
+            continue
+        ins = yel[y:y + hh, x:x + w]
+        if ins.sum() >= 15 and ins[:hh // 2].sum() >= ins[hh // 2:].sum():  # tam giác chĩa xuống
+            out.append((int(x + w // 2), int(y + hh // 2)))
+    return out
+
+
+def is_blocked(before, after, y):
+    sh = scroll_shift(before, after, y)
+    return bool(sh) and abs(sh[0]) <= 6 and abs(sh[1]) <= 6 and sh[2] >= 0.9
+
+
 class OCR:
     """Đọc chữ trắng (tên quái, tên nhân vật, tên map) trên màn hình bằng Tesseract."""
 
@@ -448,30 +500,56 @@ class OCR:
         n = len(target.split())
         if not n:
             return []
-        # gom các từ cùng dòng (gần nhau theo chiều dọc, liền nhau theo chiều ngang)
-        ws = sorted(words, key=lambda w: (round((w[2] + w[4]) / 2 / 8), w[1]))
+        flat = target.replace(" ", "")
+
+        def cy(w):
+            return (w[2] + w[4]) / 2
+
+        def next_word(a, used):
+            # từ liền bên phải cùng dòng (so trực tiếp toạ độ, không chia hàng theo y:
+            # "Heo" ở y=355 và "Tim" ở y=356 từng bị xếp vào 2 hàng khác nhau nên không ghép được)
+            h = max(4, a[4] - a[2])
+            nxt = [b for b in words if b not in used and abs(cy(a) - cy(b)) < h * 0.6
+                   and -2 <= b[1] - a[3] < h * 2]
+            return min(nxt, key=lambda b: b[1]) if nxt else None
+
         hits = []
-        for i in range(len(ws)):
-            group = [ws[i]]
-            for j in range(i + 1, len(ws)):
-                if len(group) >= n:
+        for w in words:
+            group = [w]
+            while len(group) < n + 1:
+                b = next_word(group[-1], group)
+                if b is None:
                     break
-                a, b = group[-1], ws[j]
-                h = max(4, a[4] - a[2])
-                if abs((a[2] + a[4]) / 2 - (b[2] + b[4]) / 2) < h * 0.6 and 0 <= b[1] - a[3] < h * 2:
-                    group.append(b)
+                group.append(b)
+            best = 0
+            for k in range(1, len(group) + 1):
+                text = norm_text(" ".join(g[0] for g in group[:k]))
+                if k == n:
+                    cmp, tgt = text, target
                 else:
-                    break
-            if len(group) != n:
-                continue
-            text = norm_text(" ".join(g[0] for g in group))
-            if max_len_diff is not None and abs(len(text) - len(target)) > max_len_diff:
-                continue
-            r = difflib.SequenceMatcher(None, text, target).ratio()
-            if r >= min_ratio:
-                x1, y1 = min(g[1] for g in group), min(g[2] for g in group)
-                x2, y2 = max(g[3] for g in group), max(g[4] for g in group)
-                hits.append(((x1 + x2) // 2, (y1 + y2) // 2, r))
+                    # tên bị dính liền ("HeoTim=") hoặc bị tách thêm 1 chữ -> so bỏ dấu cách,
+                    # độ dài phải gần đúng để không ghép bừa
+                    cmp, tgt = text.replace(" ", ""), flat
+                    if abs(len(cmp) - len(tgt)) > 1:
+                        continue
+                if max_len_diff is not None and abs(len(text) - len(target)) > max_len_diff:
+                    continue
+                r = difflib.SequenceMatcher(None, cmp, tgt).ratio()
+                if r >= (min_ratio if k == n else max(min_ratio, 0.8)) and r > best:
+                    best, g = r, group[:k]
+            if best:
+                x1, y1 = min(a[1] for a in g), min(a[2] for a in g)
+                x2, y2 = max(a[3] for a in g), max(a[4] for a in g)
+                hits.append((best, x1, y1, x2, y2))
+        # bỏ trùng: cùng một tên được tìm thấy từ nhiều chữ bắt đầu (kể cả khi bị ghép thêm chữ rác
+        # bên cạnh) -> các khung chồng lên nhau chỉ giữ khung giống nhất, rồi khung gọn nhất
+        hits.sort(key=lambda h: (-h[0], h[3] - h[1]))
+        out = []
+        for h in hits:
+            if not any(h[1] < o[3] and o[1] < h[3] and abs((h[2] + h[4]) - (o[2] + o[4])) < 24
+                       for o in out):
+                out.append(h)
+        hits = [((x1 + x2) // 2, (y1 + y2) // 2, r) for r, x1, y1, x2, y2 in out]
         return hits
 
 
@@ -816,6 +894,23 @@ class Bot:
             self.log("[!] Không đưa được game lên trên cùng, phím đi sẽ không có tác dụng. "
                      "Bấm chuột vào game một lần (hoặc chạy chay.bat bằng Run as administrator)")
         return False
+
+    def climb(self, key, y):
+        """Giữ phím leo tới khi tới đầu thang: camera đi theo nhân vật nên khi cảnh thôi dịch theo
+        chiều dọc là đã leo xong (thang cao thấp khác nhau, giữ cố định 1 giây có khi chưa tới)."""
+        self.ensure_focus()
+        key_down(key)
+        try:
+            t0, prev = time.time(), self.win.grab()
+            while time.time() - t0 < self.cfg["move"].get("climb_max_s", 3.0):
+                self.sleep(0.35, 0.35)
+                cur = self.win.grab()
+                sh = scroll_shift(prev, cur, y)
+                if time.time() - t0 > 0.7 and sh and abs(sh[1]) <= 3 and sh[2] >= 0.8:
+                    break
+                prev = cur
+        finally:
+            key_up(key)
 
     def hold_key(self, key, seconds):
         self.ensure_focus()
@@ -1324,7 +1419,11 @@ class Bot:
             if not hits and m.get("image"):  # dự phòng: ảnh tên đã chụp (nếu có)
                 hits = self.tpl.find_all(screen, m["image"], self.cfg.get("monster_threshold", 0.8))
             found += [(x, y, m["name"], r) for x, y, r in hits]
-        return found
+        # bỏ chữ trong khung nhiệm vụ bên trái (vd "Ẩn để tìm đường" bị đọc thành "Heo Tím")
+        H, W = screen.shape[:2]
+        ign = self.cfg.get("ignore_regions") or [[0, int(H * 0.21), int(W * 0.22), int(H * 0.42)]]
+        return [f for f in found
+                if not any(x1 <= f[0] <= x2 and y1 <= f[1] <= y2 for x1, y1, x2, y2 in ign)]
 
     def player_pos(self, screen, words=None):
         name = self.cfg.get("player_name")
@@ -1388,6 +1487,132 @@ class Bot:
         me, t = getattr(self, "_last_me", (None, 0))
         return me if me and time.time() - t <= seconds else None
 
+    # ---------------------------------------------------------- tự tìm tên quái mới
+    @staticmethod
+    def _label_icon(screen, x1, y1, y2):
+        """Biểu tượng hệ (⚡ 🔥 💧 ...) ngay bên trái chữ: chỉ tên quái có, tên người chơi / NPC không có.
+        Là 1 cụm điểm ảnh màu sáng, đậm cỡ 5-18 x 8-22px."""
+        H = screen.shape[0]
+        ax1, ax2 = max(0, x1 - 26), max(0, x1 - 1)
+        ay1, ay2 = max(0, y1 - 5), min(H, y2 + 5)
+        if ax2 - ax1 < 8 or ay2 <= ay1:
+            return False
+        hsv = cv2.cvtColor(screen[ay1:ay2, ax1:ax2], cv2.COLOR_BGR2HSV)
+        m = ((hsv[..., 1] > 120) & (hsv[..., 2] > 170)).astype(np.uint8)
+        n, _, st, _ = cv2.connectedComponentsWithStats(m)
+        return any(8 <= st[i][3] <= 22 and 5 <= st[i][2] <= 18 and st[i][4] >= 25 for i in range(1, n))
+
+    def monster_labels(self, screen, words=None):
+        """Các dòng chữ trên màn hình trông như tên quái (có biểu tượng hệ phía trước), kể cả quái
+        chưa có trong danh sách. Trả về list (tên đọc được, x, y, x trái, x phải)."""
+        words = self.read_words(screen) if words is None else words
+        H, W = screen.shape[:2]
+        ign = (self.cfg.get("ignore_regions") or [[0, int(H * 0.21), int(W * 0.22), int(H * 0.42)]]) +             [[int(W * 0.75), 0, W, int(H * 0.22)]]  # hàng nút góc trên-phải (Sự kiện, Phúc lợi...)
+        me_name = norm_text(self.cfg.get("player_name") or "").replace(" ", "")
+        cy = lambda w: (w[2] + w[4]) / 2
+        used, out = set(), []
+        for w in sorted(words, key=lambda w: w[1]):
+            if id(w) in used:
+                continue
+            g = [w]
+            used.add(id(w))
+            while True:  # ghép các chữ liền nhau trên cùng dòng
+                a = g[-1]
+                h = max(4, a[4] - a[2])
+                nx = [b for b in words if id(b) not in used and abs(cy(a) - cy(b)) < h * 0.6
+                      and -2 <= b[1] - a[3] < h * 1.2]
+                if not nx:
+                    break
+                b = min(nx, key=lambda b: b[1])
+                g.append(b)
+                used.add(id(b))
+            x1, y1 = min(t[1] for t in g), min(t[2] for t in g)
+            x2, y2 = max(t[3] for t in g), max(t[4] for t in g)
+            cx, cyy = (x1 + x2) // 2, (y1 + y2) // 2
+            if y1 < H * 0.12 or y2 > H * 0.88 or any(a1 <= cx <= a2 and b1 <= cyy <= b2
+                                                    for a1, b1, a2, b2 in ign):
+                continue
+            # làm sạch: chỉ giữ chữ cái, bỏ mẩu 1 ký tự ở 2 đầu (rác OCR)
+            toks = ["".join(c for c in t[0] if c.isalpha()) for t in g]
+            toks = [t for t in toks if t]
+            while toks and len(toks[0]) < 2:
+                toks.pop(0)
+            while toks and len(toks[-1]) < 2:
+                toks.pop()
+            text = " ".join(toks)
+            flat = norm_text(text).replace(" ", "")
+            if len(flat) < 3 or (me_name and difflib.SequenceMatcher(None, flat, me_name).ratio() > 0.75):
+                continue
+            if self._label_icon(screen, x1, y1, y2):
+                out.append((text, cx, cyy, x1, x2))
+        return out
+
+    def read_label_text(self, screen, x1, x2, cy):
+        """Đọc riêng 1 nhãn tên quái: cắt sát dòng chữ trắng quanh (cx, cy), phóng to 5 lần rồi mới
+        OCR -> giữ dấu tốt hơn đọc cả màn hình một lượt (chữ trên nhãn chỉ cao ~11px)."""
+        H, W = screen.shape[:2]
+        x1, x2 = max(0, x1 - 6), min(W, x2 + 6)  # đúng khung dòng chữ, không lấy chữ nhãn bên cạnh
+        y1, y2 = max(0, cy - 13), min(H, cy + 13)
+        c = screen[y1:y2, x1:x2]
+        if c.size == 0:
+            return ""
+        hsv = cv2.cvtColor(c, cv2.COLOR_BGR2HSV)
+        cols = np.where(((hsv[..., 2] > 190) & (hsv[..., 1] < 60)).sum(0) > 0)[0]
+        if not len(cols):
+            return ""
+        c = c[:, max(0, cols.min() - 4):cols.max() + 5]
+        g = cv2.resize(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
+        _, g = cv2.threshold(g, 170, 255, cv2.THRESH_BINARY_INV)
+        g = cv2.copyMakeBorder(g, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+        try:
+            t = self.ocr.pt.image_to_string(g, lang=self.ocr.lang, config="--psm 7")
+        except Exception:
+            return ""
+        toks = ["".join(ch for ch in w if ch.isalpha()) for w in t.split()]
+        return " ".join(w for w in toks if len(w) >= 2)
+
+    def discover_monsters(self, frames):
+        """Gom tên quái thấy trên nhiều ảnh: các cách đọc gần giống nhau (OCR hay sai dấu, sai 1 chữ)
+        gộp làm một, lấy cách viết hay gặp nhất (ưu tiên cách có dấu). Chỉ giữ tên thấy ở >= 2 ảnh
+        (hoặc ảnh duy nhất nếu chỉ có 1). Trả về list (tên, số lần thấy), nhiều nhất trước."""
+        groups = []  # [chuỗi so sánh, Counter cách viết, số ảnh]
+        for screen in frames:
+            seen_here = set()
+            for text, cx, cyy, lx1, lx2 in self.monster_labels(screen):
+                exact = self.read_label_text(screen, lx1, lx2, cyy)
+                if exact and difflib.SequenceMatcher(None, norm_text(exact).replace(" ", ""),
+                                                     norm_text(text).replace(" ", "")).ratio() >= 0.6:
+                    text = exact  # đọc riêng nhãn: giữ dấu tốt hơn
+                key = norm_text(text).replace(" ", "")
+                grp = next((g for g in groups
+                            if difflib.SequenceMatcher(None, key, g[0]).ratio() >= 0.75), None)
+                if grp is None:
+                    grp = [key, collections.Counter(), 0]
+                    groups.append(grp)
+                grp[1][text] += 1
+                if id(grp) not in seen_here:
+                    grp[2] += 1
+                    seen_here.add(id(grp))
+        # mảnh tên ("Hỏa" của "Hỏa Hầu", "Heo" của "Heo Tím") -> gộp vào tên dài chứa nó
+        groups.sort(key=lambda g: -len(g[0]))
+        merged = []
+        for g in groups:
+            host = next((m for m in merged if g[0] in m[0]), None)
+            if host:
+                host[2] = max(host[2], g[2])
+            else:
+                merged.append(g)
+        need = 2 if len(frames) > 1 else 1
+        res = []
+        for key, spell, nframes in merged:
+            if nframes < need:
+                continue
+            # cách viết hay gặp nhất (cách có dấu được tính gấp đôi: OCR hay làm rơi dấu chứ ít khi thêm)
+            best = max(spell, key=lambda t: (spell[t] * (2 if t.lower() != norm_text(t) else 1),
+                                             len(t.split())))
+            res.append((best, nframes))
+        return sorted(res, key=lambda r: -r[1])
+
     def map_label_lines(self, screen):
         """Đọc riêng ô tên map ở góc trên-phải (chữ trắng trên nền xanh đậm).
         Vùng mặc định: 25% bên phải, 12% phía trên; đổi bằng 'map_region' [x1, y1, x2, y2] trong config."""
@@ -1430,11 +1655,100 @@ class Bot:
                     best, bv = name, r
         return best
 
+    @staticmethod
+    def intro_cards(screen):
+        """Màn chào trước trận: 2 thẻ trắng xếp chéo giữa màn hình ("phucdd Cấp 55" ở trên,
+        "Heo Tím Cấp 51" ở dưới), hiện ~2-3 giây sau khi đánh trúng quái rồi mới vào bàn cờ.
+        Trả về (thẻ trên, thẻ dưới) dạng (x, y, w, h), hoặc None. Popup nhặt đồ chỉ có 1 thẻ."""
+        H, W = screen.shape[:2]
+        hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
+        m = ((hsv[..., 2] > 230) & (hsv[..., 1] < 30)).astype(np.uint8)
+        n, _, st, _ = cv2.connectedComponentsWithStats(m)
+        cards = [tuple(int(v) for v in st[i][:4]) for i in range(1, n) if W * 0.15 < st[i][2] < W * 0.35
+                 and 0.08 * H < st[i][3] < 0.2 * H and st[i][4] > 0.6 * st[i][2] * st[i][3]]
+        for a in cards:
+            for b in cards:
+                if abs(a[2] - b[2]) < W * 0.05 and abs(a[3] - b[3]) < H * 0.03 and H * 0.08 < b[1] - a[1] < H * 0.3:
+                    return a, b
+        return None
+
+    @classmethod
+    def battle_intro(cls, screen):
+        return cls.intro_cards(screen) is not None
+
+    def read_intro_card(self, screen):
+        """Đọc tên + cấp con quái trên thẻ dưới của màn chào trước trận (chữ to, đen trên nền trắng ->
+        đọc đúng cả dấu, vd "Heo Tím" / "Cấp: 51"). Trả về (tên, cấp hoặc None) hoặc None.
+        Con quái trên thẻ có hoạt ảnh, đôi khi che số cấp -> nên đọc vài khung rồi lấy cái hay gặp."""
+        cards = self.intro_cards(screen)
+        if not cards or not self.ocr.ok:
+            return None
+        x, y, w, h = cards[1]
+        g = cv2.cvtColor(screen[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        try:
+            d = self.ocr.pt.image_to_data(g, lang=self.ocr.lang, config="--psm 6",
+                                          output_type=self.ocr.pt.Output.DICT)
+        except Exception:
+            return None
+        # chỉ giữ chữ đọc chắc (biểu tượng hệ sau tên và con quái chạy qua thẻ cho ra chữ rác ~0-12%)
+        rows = {}
+        for t, c, bl, ln in zip(d["text"], d["conf"], d["block_num"], d["line_num"]):
+            if t.strip() and float(c) >= 60:
+                rows.setdefault((bl, ln), []).append(t.strip())
+        name, level = None, None
+        for _, toks in sorted(rows.items()):
+            line = " ".join(toks)
+            if "IQ" in line:
+                continue
+            mt = re.search(r"p\s*[:.]?\s*(\d{1,3})(?!\d)", line)
+            if mt:
+                if level is None:
+                    level = int(mt.group(1))
+                continue
+            if name is None:
+                words = ["".join(ch for ch in t if ch.isalpha()) for t in toks]
+                words = [w for w in words if len(w) >= 2]
+                if words:
+                    name = " ".join(words)
+        return (name, level) if name else None
+
+    def note_intro(self, screen):
+        """Đang ở màn chào trước trận: đọc thẻ quái (tối đa 5 lần) để lúc vào trận biết chắc tên + cấp."""
+        reads = getattr(self, "_intro_reads", [])
+        if len(reads) < 5:
+            r = self.read_intro_card(screen)
+            if r:
+                reads.append(r)
+        self._intro_reads = reads
+
+    def finish_intro(self):
+        """Vào trận: chốt tên + cấp đọc được ở màn chào (lấy giá trị hay gặp nhất) và báo cho app
+        (app sửa tên trong danh sách cho đúng dấu và điền cấp)."""
+        reads, self._intro_reads = getattr(self, "_intro_reads", []), []
+        if not reads:
+            return
+        name = collections.Counter(r[0] for r in reads).most_common(1)[0][0]
+        lv = [r[1] for r in reads if r[1]]
+        # con quái trên thẻ có lúc che mất 1 chữ số ("51" đọc thành "5") -> số bị che là phần đầu của
+        # số đầy đủ: bỏ số đó nếu có số dài hơn bắt đầu bằng nó
+        lv = [v for v in lv if not any(w != v and str(w).startswith(str(v)) for w in lv)]
+        level = collections.Counter(lv).most_common(1)[0][0] if lv else None
+        self.log(f"  Đối thủ: {name}" + (f" (cấp {level})" if level else ""))
+        cb = getattr(self, "on_monster_info", None)
+        if cb:
+            cb(getattr(self, "_map", None), name, level)
+
     def wait_battle(self, seconds):
+        """Chờ vào trận. Thấy màn chào trước trận thì chờ thêm (không bấm gì kẻo huỷ trận)."""
         end = time.time() + seconds
         while time.time() < end:
-            if self.in_battle(self.win.grab()):
+            screen = self.win.grab()
+            if self.in_battle(screen):
                 return True
+            if self.battle_intro(screen):
+                end = max(end, time.time() + 4)
+                self.note_intro(screen)
             self.sleep(0.3)
         return False
 
@@ -1489,6 +1803,7 @@ class Bot:
         target, me = self.nearest_target(screen, map_name, selected)
         if not target:
             return False
+        self._last_seen = time.time()
         mv = self.cfg["move"]
         self.log(f"-> Tìm thấy {target[2]}, tiến tới đánh")
         if not me:
@@ -1506,45 +1821,62 @@ class Bot:
             return self.try_attack(target)
 
         # đi từng bước bằng phím, sau mỗi bước đọc lại vị trí nhân vật và quái
-        near_x = mv.get("attack_range_px", 120)  # trong khoảng này: lao tới + bấm đánh
+        # trong khoảng này: chuyển sang áp sát + bấm đánh (charge tự đọc lại vị trí sau mỗi lần thử,
+        # nhanh hơn đi từng bước ngắn đuổi theo con quái đang đi)
+        near_x = mv.get("attack_range_px", 200)
         level_y = mv.get("same_level_px", 60)
         speed = mv.get("speed_px_per_s", 250)
         direction = 1 if target[0] >= me[0] else -1  # hướng đi tìm mép khi cần rơi xuống
         searching_edge = False
         stuck = 0
         misses = 0  # số lần liền đọc trượt tên quái
+        jump_next = False  # bước trước bị vướng bậc/tường -> bước này vừa đi vừa nhảy
+        jumps_up = 0  # số lần liền nhảy lên tầng trên (không thấy thang)
+        lad_mem = None  # thang vừa đi tới (x, y, lúc nào): đứng trước thang thì nhân vật che mất thang
+        lad_goal = None
         for _ in range(mv.get("max_steps", 25)):
+            before = screen
             x, y = target[0], target[1]
             dx, dy = x - me[0], y - me[1]
             searching_edge = False
             long_walk = False  # chỉ tính "kẹt" khi đã giữ phím đủ lâu
             if abs(dx) <= near_x and abs(dy) <= level_y:
                 self.log(f"  Tới gần {target[2]} (cách {dx:+d}px), lao tới và bấm đánh")
-                return self.charge(1 if dx > 0 else -1, target)
+                # tên quái cùng mặt đất thường thấp hơn tên mình ~20px; cao hơn = quái đứng trên bậc
+                return self.charge(target, me, map_name, selected, jump=jump_next or dy < -12)
 
             if abs(dy) <= level_y:
                 # cùng tầng -> đi ngang tới quái
-                self.log(f"  Đi {'phải' if dx > 0 else 'trái'} (còn cách {abs(dx)}px)")
+                self.log(f"  Đi {'phải' if dx > 0 else 'trái'} (còn cách {abs(dx)}px)"
+                         + (", nhảy qua chỗ vướng" if jump_next else ""))
                 t = (abs(dx) - near_x / 2) / speed
-                long_walk = t >= 0.4
+                long_walk = t >= 0.3
                 # còn cách dưới ~300px: vừa đi vừa bấm đánh, không để quái đi ngang qua
-                if self.walk(1 if dx > 0 else -1, t, attack=abs(dx) <= mv.get("attack_spam_px", 300)):
-                    return True
+                self.walk(1 if dx > 0 else -1, t, jump=jump_next)
             else:
                 vkey = mv.get("key_down", "down") if dy > 0 else mv.get("key_up", "up")
                 ladder = self.find_ladder(screen, me, target, map_name)
+                if not ladder and lad_mem and time.time() - lad_mem[2] < 4:
+                    ladder = lad_mem[:2]  # đứng trước thang, nhân vật che mất thang -> dùng chỗ vừa thấy
                 if ladder and abs(ladder[0] - me[0]) > 15:
                     # Cách 1: có thang -> đi tới thang
                     self.log(f"  Quái ở tầng {'dưới' if dy > 0 else 'trên'}, đi tới thang")
                     t = (abs(ladder[0] - me[0]) - 5) / speed
-                    long_walk = t >= 0.4
-                    self.walk(1 if ladder[0] > me[0] else -1, t)
+                    long_walk = t >= 0.3
+                    self.walk(1 if ladder[0] > me[0] else -1, t, jump=jump_next)
+                    lad_goal = ladder
                 elif ladder and vkey:
                     # đang đứng ở thang -> leo lên / xuống
                     self.log(f"  Leo {'xuống' if dy > 0 else 'lên'} thang")
-                    self.hold_key(vkey, 1.0)
+                    self.climb(vkey, me[1])
+                    lad_mem = None
                 elif dy < 0:
                     # quái ở tầng trên, không thấy thang -> nhảy về phía quái
+                    jumps_up += 1
+                    if jumps_up > mv.get("max_jumps_up", 3):
+                        self.log(f"  Nhảy mãi không lên được tầng của {target[2]}, bỏ con này 20 giây")
+                        self._skip = getattr(self, "_skip", []) + [(target[0], target[1], time.time() + 20)]
+                        return False
                     self.log("  Quái ở tầng trên, nhảy lên")
                     long_walk = True
                     self.walk(1 if dx > 0 else -1, 0.5, jump=True)
@@ -1554,33 +1886,44 @@ class Bot:
                     self.log(f"  Quái ở chỗ thấp hơn, đi {'phải' if dx > 0 else 'trái'} về phía quái "
                              f"(còn cách {abs(dx)}px)")
                     t = (abs(dx) - near_x / 2) / speed
-                    long_walk = t >= 0.4
+                    long_walk = t >= 0.3
                     direction = 1 if dx > 0 else -1
-                    if self.walk(direction, t, attack=abs(dx) <= mv.get("attack_spam_px", 300)):
-                        return True
+                    self.walk(direction, t, jump=jump_next)
                 else:
                     # Cách 2: quái ở tầng dưới, không thấy thang -> đi ra mép để rơi xuống
                     searching_edge = True
                     self.log(f"  Quái ở tầng dưới, đi {'phải' if direction > 0 else 'trái'} tìm mép để xuống")
                     long_walk = True
-                    self.walk(direction, 0.5)
+                    self.walk(direction, 0.5, jump=jump_next)
                     if vkey:
                         key_press(vkey)
             self.sleep(0.2, 0.3)
 
             screen = self.win.grab()
-            if self.in_battle(screen):
+            if self.in_battle(screen) or (self.battle_intro(screen) and self.wait_battle(5)):
                 return True
+            # đi đủ lâu mà cảnh không dịch -> nhân vật đang vướng bậc/tường
+            blocked = long_walk and is_blocked(before, screen, me[1])
             prev, last = me, target
             band = (me[1] - 150, me[1] + 150) if abs(dy) <= level_y else None
             prefer = (last[0] - prev[0], last[1] - prev[1], last[2])
+            sh = scroll_shift(before, screen, prev[1])
+            if lad_goal:
+                # thang dịch theo cảnh: nhớ chỗ thang để bước sau leo (kể cả khi bị nhân vật che)
+                lad_mem = (lad_goal[0] + sh[0], lad_goal[1] + sh[1], time.time())                     if sh and sh[2] >= 0.45 else None
+                lad_goal = None
+            if sh and sh[2] >= 0.45:
+                # cảnh dịch bao nhiêu thì quái (so với mình) cũng dịch bấy nhiêu -> đoán đúng chỗ con
+                # đang đuổi, không nhảy sang con khác (trước đây đi 300px là mất dấu, lúc trái lúc phải)
+                prefer = (prefer[0] + sh[0], prefer[1] + sh[1], prefer[2])
             target, me = self.nearest_target(screen, map_name, selected, band, prefer)
             if not target:
                 ldx = last[0] - prev[0]
-                if abs(ldx) <= near_x * 2 and abs(last[1] - prev[1]) <= level_y:
+                if abs(ldx) <= max(near_x, 240) and abs(last[1] - prev[1]) <= level_y:
                     # đứng sát quái thì tên 2 bên đè lên nhau, OCR hay đọc trượt -> cứ lao tới đánh
                     self.log("  Mất dấu quái ở gần (tên bị đè), lao tới và bấm đánh")
-                    return self.charge(1 if ldx > 0 else -1, last)
+                    return self.charge(last, prev, map_name, selected,
+                                       jump=blocked or last[1] - prev[1] < -12)
                 misses += 1
                 if misses > mv.get("max_misses", 2):
                     self.log("  Không còn thấy quái trên màn hình")
@@ -1595,38 +1938,93 @@ class Bot:
             if not me:
                 self.log("  Không thấy tên nhân vật (bị che?), dùng vị trí cũ")
                 me = prev
-            # camera đi theo nhân vật -> vị trí nhân vật trên màn hình gần như đứng yên khi đi.
-            # Coi là "kẹt" chỉ khi cả vị trí nhân vật lẫn khoảng cách tới quái đều không đổi.
-            moved_me = abs(me[0] - prev[0]) + abs(me[1] - prev[1])
-            moved_rel = abs((target[0] - me[0]) - (last[0] - prev[0])) + \
-                abs((target[1] - me[1]) - (last[1] - prev[1]))
-            if long_walk and moved_me < 5 and moved_rel < 8:
+            mk = self.attack_marker(screen, me)
+            if mk and abs(mk[0] - target[0]) <= 100:
+                # đang đi thì con quái đang đuổi vào tầm đánh (game hiện dấu ▼ trên đầu nó) -> đánh luôn
+                self.log(f"  {target[2]} vào tầm đánh (thấy dấu ▼), bấm đánh")
+                self.press_attack()
+                if self.wait_battle(1.5):
+                    return True
+            if blocked:
                 stuck += 1
-                if searching_edge:
-                    direction = -direction  # đụng tường -> quay lại tìm mép bên kia
+                if jump_next and searching_edge:
+                    direction = -direction  # nhảy rồi vẫn vướng tường -> quay lại tìm mép bên kia
+                self.log("  Bị vướng (bậc/tường), bước sau nhảy qua")
+                jump_next = True
                 if stuck >= 4:
-                    self.log("[!] Nhân vật không di chuyển. Kiểm tra phím đi ở tab Cài đặt "
-                             "(phím có đi được trong game không?)")
+                    self.log("  Kẹt mãi không qua được, bỏ con này")
                     return False
             elif long_walk:
                 stuck = 0
+                jump_next = False
         return False
 
-    def charge(self, direction, target):
-        """Giữ phím đi về phía quái và bấm nút đánh liên tục (quái hay đi lòng vòng)."""
+    def attack_marker(self, screen, me):
+        """Dấu ▼ 'trong tầm đánh' trên đầu một con quái cùng tầng, gần nhân vật (None nếu không có)."""
+        if not me:
+            return None
+        for x, y in attack_markers(screen):
+            if abs(x - me[0]) <= 170 and me[1] - 45 <= y <= me[1] + 25:
+                return x, y
+        return None
+
+    def charge(self, target, me, map_name, selected, jump=False):
+        """Áp sát quái và bấm đánh đúng lúc; lặp lại tới khi vào trận (tối đa ~6 giây).
+        Đo trên map Lạc Cốc:
+        - game vẽ dấu ▼ đỏ trên đầu con quái đang trong tầm đánh phía trước mặt (cách ~-76..+131px,
+          phía đang quay mặt xa hơn) -> thấy dấu là bấm đánh ngay, đánh trúng gần như chắc chắn.
+        - đòn đánh chỉ trúng phía TRƯỚC mặt; chạm phím rất nhanh không quay mặt, phải đi 1 bước ngắn.
+        - bấm nút đánh lúc đang đi làm nhân vật đứng lại -> đi xong mới bấm.
+        - quái đi lại liên tục (~100px/giây) -> đi từng đoạn ngắn rồi nhìn lại.
+        - đánh trúng thì ~1 giây sau hiện màn chào trước trận (wait_battle tự chờ thêm).
+        jump: quái đứng trên bậc cao hơn -> nhảy lên khi đi."""
         mv = self.cfg["move"]
-        key = mv["key_right"] if direction > 0 else mv["key_left"]
-        end = time.time() + mv.get("charge_seconds", 1.5)
-        self.ensure_focus()
-        key_down(key)
-        try:
-            while time.time() < end:
-                self.press_attack()
-                self.sleep(0.15, 0.2)
-                if self.in_battle(self.win.grab()):
-                    return True
-        finally:
-            key_up(key)
+        speed = mv.get("speed_px_per_s", 250)
+        level_y = mv.get("same_level_px", 60)
+        gap = mv.get("attack_gap_px", 70)
+        end = time.time() + mv.get("charge_seconds", 6)
+        tries = 0
+        while time.time() < end:
+            screen = self.win.grab()
+            if self.in_battle(screen) or (self.battle_intro(screen) and self.wait_battle(5)):
+                return True
+            mk = self.attack_marker(screen, me)
+            if mk and abs(mk[0] - target[0]) > 100:
+                mk = None  # dấu trên đầu con khác (có thể là quái không chọn đánh)
+            dx = target[0] - me[0]
+            toward = 1 if dx > 0 else -1
+            if not mk:
+                # chưa có dấu: nhìn lại quái đang ở đâu rồi nhích tới / quay mặt
+                t, m = self.nearest_target(screen, map_name, selected, (me[1] - 150, me[1] + 150),
+                                           (dx, target[1] - me[1], target[2]))
+                m = m or me
+                if not t or abs(t[1] - m[1]) > level_y or abs(t[0] - m[0]) > 400:
+                    self.log(f"  Quái đi mất (đã thử đánh {tries} lần)")
+                    break
+                target, me = t, m
+                dx = target[0] - me[0]
+                toward = 1 if dx > 0 else -1
+                if abs(dx) > gap + 40:
+                    before = self.win.grab()
+                    self.walk(toward, min(0.5, (abs(dx) - gap) / speed), jump=jump)
+                    if not jump and is_blocked(before, self.win.grab(), me[1]):
+                        self.walk(toward, 0.4, jump=True)  # vướng bậc -> nhảy qua
+                    jump = False
+                    continue
+                if abs(dx) < 30:
+                    self.walk(-toward, 0.2)  # đứng chồng lên quái -> lùi ra rồi quay lại
+                    self.walk(toward, 0.12)
+                    continue
+                if getattr(self, "_facing", 0) != toward:
+                    self.walk(toward, 0.12)  # quái ở sau lưng -> quay mặt lại
+                    continue
+                # đã quay mặt, trong tầm mà vẫn chưa thấy dấu -> cứ thử bấm
+            tries += 1
+            where = f"thấy dấu ▼ (cách {mk[0] - me[0]:+d}px)" if mk else f"quái cách {dx:+d}px"
+            self.log(f"    lần {tries}: {where}, bấm đánh")
+            self.press_attack()
+            if self.wait_battle(1.5):
+                return True
         return self.try_attack(target)
 
     def try_attack(self, target):
@@ -1644,7 +2042,8 @@ class Bot:
         attack=True: vừa đi vừa bấm đánh, trả về True nếu đã vào trận."""
         mv = self.cfg["move"]
         key = mv["key_right"] if direction > 0 else mv["key_left"]
-        seconds = max(0.15, min(1.0, seconds))
+        seconds = max(0.12, min(1.0, seconds))
+        self._facing = direction
         self.ensure_focus()
         end = time.time() + seconds
         key_down(key)
@@ -1674,7 +2073,7 @@ class Bot:
 
     def find_ladder(self, screen, me, target, map_name=None):
         """Thang gần nhân vật nhất nằm giữa tầng của nhân vật và tầng của quái."""
-        ladders = self.tpl.find_all(screen, self.ladder_tpl(map_name), self.cfg.get("ladder_threshold", 0.7))
+        ladders = self.tpl.find_all(screen, self.ladder_tpl(map_name), self.cfg.get("ladder_threshold", 0.6))
         lo, hi = min(me[1], target[1]) - 40, max(me[1], target[1]) + 80
         ladders = [lad for lad in ladders if lo <= lad[1] <= hi]
         return min(ladders, key=lambda lad: abs(lad[0] - me[0])) if ladders else None
@@ -1683,8 +2082,6 @@ class Bot:
     def stop_reason(self):
         a = self.cfg["auto"]
         st = self.stats
-        if a.get("max_minutes") and time.time() - st["start"] > a["max_minutes"] * 60:
-            return f"Đã chạy đủ {a['max_minutes']} phút"
         if a.get("max_battles") and st["battles"] >= a["max_battles"]:
             return f"Đã đánh đủ {a['max_battles']} trận"
         if a.get("max_lose_streak") and st["lose_streak"] >= a["max_lose_streak"]:
@@ -1692,6 +2089,7 @@ class Bot:
         return None
 
     def loop(self, map_name, selected):
+        self._map, self._intro_reads = map_name, []
         self.stats.update(battles=0, wins=0, losses=0, lose_streak=0, start=time.time())
         self.attach(focus=True)
         self.ensure_size()
@@ -1710,8 +2108,14 @@ class Bot:
                 if not was_battle:
                     self.stats["battles"] += 1
                     self.log(f"[Trận {self.stats['battles']}]")
+                    self.finish_intro()
                 was_battle = True
                 self.battle_turn()
+                idle = time.time()
+                continue
+            if self.battle_intro(screen):  # màn chào trước trận -> chờ, không bấm gì
+                self.note_intro(screen)
+                self.sleep(0.3)
                 idle = time.time()
                 continue
 
@@ -1749,14 +2153,40 @@ class Bot:
                 idle = time.time()
                 continue
 
+            mv = self.cfg["move"]
             if time.time() - idle > self.cfg.get("stuck_seconds", 60):
                 self.log("[!] Lâu không thấy quái/nút nào. Nhấn ESC và đi dạo một chút...")
                 key_press("esc")
-                mv = self.cfg["move"]
                 if mv.get("key_left"):
                     self.hold_key(random.choice([mv["key_left"], mv["key_right"]]), 1.0)
                 idle = time.time()
+            elif mv.get("key_left") and                     time.time() - max(getattr(self, "_last_seen", 0), idle) > self.cfg.get("wander_after_s", 8):
+                self.wander()
+                continue
             self.sleep(0.7)
+
+    def wander(self):
+        """Màn hình không có quái đã chọn: đi tuần qua lại quanh chỗ đang đứng để tìm (không đứng chờ,
+        cũng không đi mãi 1 hướng ra khỏi khu có quái): đi 'wander_steps' (4) đoạn ~1.2 giây rồi quay đầu.
+        Vướng tường thì nhảy thử, nhảy rồi vẫn vướng thì quay đầu sớm."""
+        d = getattr(self, "_wander_dir", 0) or random.choice([-1, 1])
+        self._wander_n = getattr(self, "_wander_n", 0) + 1
+        if self._wander_n > self.cfg["move"].get("wander_steps", 4):
+            d, self._wander_n = -d, 1
+        if time.time() - getattr(self, "_wander_log", 0) > 15:
+            self._wander_log = time.time()
+            self.log(f"  Không thấy quái trên màn hình, đi {'phải' if d > 0 else 'trái'} tìm quái")
+        me = self.recent_player_pos(30) or (self.win.grab().shape[1] // 2, 380)
+        before = self.win.grab()
+        self.walk(d, 1.2, jump=getattr(self, "_wander_blocked", 0) == 1)
+        after = self.win.grab()
+        if is_blocked(before, after, me[1]):
+            self._wander_blocked = getattr(self, "_wander_blocked", 0) + 1
+            if self._wander_blocked >= 2:
+                d, self._wander_blocked, self._wander_n = -d, 0, 0  # nhảy rồi vẫn vướng -> quay đầu
+        else:
+            self._wander_blocked = 0
+        self._wander_dir = d
 
     def start(self, map_name, selected, on_done=None):
         if self.thread and self.thread.is_alive():

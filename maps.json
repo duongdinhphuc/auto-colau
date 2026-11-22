@@ -58,8 +58,29 @@
       {
         "name": "Thỏ Hồng",
         "level": null
+      },
+      {
+        "name": "Heo Lửa",
+        "level": null
       }
     ],
     "ladder": "ladders/cuu_phong.png"
+  },
+  "Lạc Cốc": {
+    "monsters": [
+      {
+        "name": "Heo Tím",
+        "level": null
+      },
+      {
+        "name": "Hổ Vằn",
+        "level": null
+      },
+      {
+        "name": "Báo Đốm",
+        "level": 51
+      }
+    ],
+    "ladder": "ladders/lac_coc.png"
   }
 }

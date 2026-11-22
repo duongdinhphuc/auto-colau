@@ -62,7 +62,7 @@
     "speed_px_per_s": 250
   },
   "auto": {
-    "map": "Cửu Phong",
+    "map": "Lạc Cốc",
     "selected": {
       "Trại Vân Sơn": [
         "Cua Càng"
@@ -72,13 +72,15 @@
       ],
       "Cửu Phong": [
         "Thỏ Hồng"
+      ],
+      "Lạc Cốc": [
+        "Báo Đốm"
       ]
     },
     "skill": 1,
     "use_potion": true,
     "potion_hp": 30,
     "max_lose_streak": 5,
-    "max_minutes": 480,
     "max_battles": 0
   },
   "player_name": "phucdd",

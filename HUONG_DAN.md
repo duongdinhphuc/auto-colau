@@ -29,6 +29,8 @@ Mỗi lần bấm **Chụp** hoặc **Chọn**, màn hình sẽ đứng hình đ
 - **Quái**: gõ **tên quái** đúng như dòng chữ trên đầu con quái và cấp (nếu muốn), rồi bấm **Thêm**. Tích chọn những con muốn đánh.
   Bot đọc chữ trên màn hình để tìm con đó. Gõ có dấu hay không dấu đều được, và bot chấp nhận đọc sai 1–2 ký tự.
 - **Quét màn hình**: báo mỗi con trong danh sách đang thấy mấy con trên màn hình, kèm toàn bộ chữ bot đọc được (xem ở ô log).
+  Bot cũng tự tìm tên quái **chưa có** trong danh sách (tên quái luôn có biểu tượng hệ ⚡🔥💧 phía trước, tên người chơi thì không) và mở hộp để bạn tick con muốn thêm. Chữ đọc từ màn hình có thể thiếu/sai dấu: sửa lại trong hộp nếu muốn (thiếu dấu vẫn đánh được). Dòng thấy ở ít ảnh thường là chữ rác nên không được tick sẵn. Nên đứng ở map, ngoài trận, chỗ có quái khi bấm.
+  Bot đọc riêng từng nhãn tên (cắt sát, phóng to) nên đa số tên ra đúng dấu; chỗ nào còn sai dấu sẽ được **tự sửa ở trận đầu tiên**: lúc vào trận game hiện thẻ chào có tên quái chữ to và cấp (vd "Heo Tím – Cấp: 51"), bot đọc thẻ đó rồi sửa tên trong danh sách cho đúng và điền cấp (ô log ghi "Đã cập nhật danh sách quái").
   Nếu bot không thấy con nào dù quái đang hiện, xem phần "Khi bot không đọc được tên" ở cuối.
 - **Kỹ năng**: mở bảng Kỹ năng trong trận, bấm *Chụp* để chụp biểu tượng từng kỹ năng, rồi chọn 1 kỹ năng (hoặc "Không dùng").
 - **Bình máu**: tích ô và đặt mức % máu.
@@ -54,13 +56,26 @@ Mỗi lần bấm **Chụp** hoặc **Chọn**, màn hình sẽ đứng hình đ
 - Nếu bot hay nhận nhầm tên quái này thành quái khác, tăng `name_match` (0.72 → 0.8).
 
 ## Thang leo
-Mỗi map có một kiểu thang riêng (thang gỗ, thang dây...). Khi đứng ở map mới, chọn map đó ở tab **Tự động** rồi bấm **Chụp thang**, kéo chọn sát một đoạn thang khoảng 4–6 bậc. Bên cạnh nút sẽ hiện "thang: ✔" khi map đã có ảnh thang. Một ảnh dùng được cho cả ban ngày lẫn ban đêm. Map Hồng Giang đã có sẵn.
+Mỗi map có một kiểu thang riêng (thang gỗ, thang dây...). Khi đứng ở map mới, chọn map đó ở tab **Tự động** rồi bấm **Chụp thang**, kéo chọn sát một đoạn thang khoảng 4–6 bậc. Bên cạnh nút sẽ hiện "thang: ✔" khi map đã có ảnh thang. Một ảnh dùng được cho cả ban ngày lẫn ban đêm. Map Hồng Giang và Lạc Cốc đã có sẵn.
+
+## Cách bot đi tìm quái
+- Đi tới con quái gần nhất cùng tầng, bám theo đúng con đó (không đổi sang con khác giữa đường).
+- Vướng bậc / tường (cảnh không dịch khi giữ phím đi) thì bước sau tự nhảy qua.
+- Không bấm nút Đánh lúc đang đi (bấm là nhân vật đứng lại). Tới gần thì quay mặt về phía quái rồi mới bấm.
+- Game hiện dấu ▼ đỏ trên đầu con quái đang trong tầm đánh: thấy dấu là bot bấm đánh ngay.
+- Đánh trúng thì game hiện màn chào 2 thẻ (tên mình / tên quái) khoảng 2 giây: bot chờ, không bấm gì.
+- Màn hình không có quái đã chọn quá 8 giây thì bot đi tuần qua lại tìm quái (4 đoạn mỗi hướng).
+- Quái ở tầng trên mà nhảy 3 lần không lên được thì bỏ con đó 20 giây.
+- Chữ trong khung nhiệm vụ bên trái được bỏ qua (tránh đọc nhầm thành tên quái).
+
+Có thể chỉnh trong `config.json`, mục `"move"` (sửa khi đã tắt bot): `attack_gap_px` (khoảng cách đứng đánh, mặc định 70), `attack_range_px` (cách bao nhiêu thì chuyển sang áp sát + đánh, 200), `charge_seconds` (thời gian áp sát tối đa, 6), `max_jumps_up` (3), `wander_steps` (4). Ngoài mục `"move"`: `wander_after_s` (8), `ignore_regions` (các vùng bỏ qua khi đọc tên quái, dạng `[[x1, y1, x2, y2], ...]`).
 
 ## Theme ngày / đêm
 Game đổi theme ban ngày / ban đêm theo giờ thật. Bot đã được chỉnh để chạy được cả hai:
 - Các nút tròn (Đánh, Đầu hàng, Túi đồ): bot chỉ so phần lòng nút, không so nền quanh nút.
 - Chữ "Lượt của đối thủ": bot chỉ so phần chữ đỏ, không so các viên cờ phía sau.
 - Thanh máu: bot đọc dòng số (vd 349/543) trên thanh.
+- Đi tìm quái (dấu ▼ trong tầm đánh, màn chào trước trận, nhận biết bị vướng, nhận thang): đã thử cả ngày lẫn đêm trên map Lạc Cốc.
 - Tên nhân vật màu xanh ngọc: lọc chặt để không lẫn với bầu trời ban ngày (`ocr_cyan_s`, `ocr_cyan_v` trong `config.json`).
 Khi chụp lại ảnh mẫu, nên cắt sát nút, đừng lấy nhiều nền xung quanh. Nếu thấy bot chỉ hỏng vào một buổi (ngày hoặc đêm), hãy quay video gửi lại.
 

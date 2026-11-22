@@ -2,6 +2,7 @@
 """
 Bảng điều khiển auto Cờ Lau Loạn Thế (PC Windows) - chạy:  python app.py
 """
+import difflib
 import os
 import queue
 import sys
@@ -110,6 +111,8 @@ class App:
         self.root.geometry("470x760")
         self.q = queue.Queue()
         self.bot = B.Bot(log=lambda m: self.q.put(("log", m)))
+        # bot đọc được tên + cấp quái trên màn chào trước trận -> app sửa danh sách (chỉ app ghi maps.json)
+        self.bot.on_monster_info = lambda *a: self.q.put(("mon", a))
         self.cfg, self.maps = self.bot.cfg, self.bot.maps
         self.picker = Picker(self.root)
         self.thumbs = []
@@ -249,10 +252,8 @@ class App:
         lim = ttk.LabelFrame(f, text="Tự dừng khi", padding=6)
         lim.pack(fill="x", pady=8)
         self.lose_var = tk.IntVar(value=self.cfg["auto"].get("max_lose_streak", 2))
-        self.min_var = tk.IntVar(value=self.cfg["auto"].get("max_minutes", 120))
         self.bat_var = tk.IntVar(value=self.cfg["auto"].get("max_battles", 0))
         for i, (t, v) in enumerate([("Thua liên tiếp (trận)", self.lose_var),
-                                    ("Chạy quá (phút)", self.min_var),
                                     ("Đủ số trận", self.bat_var)]):
             ttk.Label(lim, text=t).grid(row=0, column=i * 2, sticky="w")
             ttk.Spinbox(lim, from_=0, to=9999, width=5, textvariable=v).grid(row=0, column=i * 2 + 1,
@@ -358,16 +359,29 @@ class App:
         self.refresh_monsters()
 
     def scan_screen(self):
-        """Đọc chữ trên màn hình game, báo con quái nào trong danh sách đang thấy."""
+        """Đọc chữ trên màn hình game: báo con quái nào trong danh sách đang thấy, và tự tìm tên quái
+        chưa có trong danh sách (tên quái có biểu tượng hệ ⚡🔥💧 phía trước) để thêm vào."""
         self.collect_auto()
         self.bot.reload()
         self.bot.attach()
-        s = self.bot.win.grab()
+        self.log("Đang quét màn hình (khoảng 3 giây)...")
+        self.root.update()
+        frames = []
+        for i in range(6):  # nhiều ảnh: quái đi lại, tên bị che / đọc sai ở ảnh này thì ảnh khác vẫn thấy
+            if i:
+                time.sleep(0.4)
+            frames.append(self.bot.win.grab())
+        s = frames[0]
         words = self.bot.read_words(s)
         if not self.bot.ocr.ok:
             messagebox.showerror("Thiếu Tesseract", self.bot.ocr.err)
             return
         m = self.map_var.get()
+        if not m:
+            m = self.bot.detect_map(s, words)
+            if m and m in self.maps:
+                self.map_var.set(m)
+        found_new = self.bot.discover_monsters(frames)
         names = [x["name"] for x in self.maps.get(m, {}).get("monsters", [])]
         found = self.bot.targets(s, m, names, words)
         self.seen = {n: sum(1 for f in found if f[2] == n) for n in names}
@@ -377,6 +391,62 @@ class App:
         self.log(f"Nhân vật: {'thấy ' + str(me) if me else 'không thấy (kiểm tra Tên nhân vật ở Cài đặt)'}"
                  f" | Map: {mp or 'không nhận ra'}")
         self.refresh_monsters()
+        have = [B.norm_text(x["name"]).replace(" ", "") for x in self.maps.get(m, {}).get("monsters", [])]
+        new = [(n, c) for n, c in found_new
+               if not any(difflib.SequenceMatcher(None, B.norm_text(n).replace(" ", ""), h).ratio() >= 0.8
+                          for h in have)]
+        if not m:
+            self.log("Chưa chọn bản đồ: chọn map (hoặc '+ Map') trước khi thêm quái")
+        elif new:
+            self.log("Tìm thấy quái chưa có trong danh sách: " + ", ".join(n for n, _ in new))
+            self.ask_new_monsters(m, new, len(frames))
+        else:
+            self.log("Không thấy quái nào mới (chưa có trong danh sách) trên màn hình")
+
+    def ask_new_monsters(self, m, new, n_frames):
+        """Hộp chọn quái mới tìm thấy: tick con muốn thêm, sửa tên nếu đọc sai dấu."""
+        top = tk.Toplevel(self.root)
+        top.title("Quái mới trên màn hình")
+        top.transient(self.root)
+        top.attributes("-topmost", True)
+        ttk.Label(top, text=f"Map: {m}\nTick con muốn thêm. Chữ đọc từ màn hình có thể sai dấu, "
+                            "sửa lại cho đúng\n(bot tìm quái không phân biệt dấu nên thiếu dấu vẫn đánh được).",
+                  justify="left").grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 4))
+        rows = []
+        for i, (name, cnt) in enumerate(new, start=1):
+            v = tk.BooleanVar(value=cnt >= max(2, n_frames // 2))  # thấy ít ảnh -> có thể là chữ rác
+            e = tk.StringVar(value=name)
+            ttk.Checkbutton(top, variable=v).grid(row=i, column=0, padx=(8, 2))
+            ttk.Entry(top, textvariable=e, width=24).grid(row=i, column=1, sticky="we", pady=1)
+            ttk.Label(top, text=f"thấy {cnt}/{n_frames} ảnh", foreground="gray").grid(row=i, column=2, padx=8)
+            rows.append((v, e))
+
+        def add():
+            mons = self.maps[m].setdefault("monsters", [])
+            added = []
+            for v, e in rows:
+                name = " ".join(e.get().split())
+                if v.get() and name and not any(B.norm_text(x["name"]) == B.norm_text(name) for x in mons):
+                    mons.append({"name": name, "level": None})
+                    added.append(name)
+            if added:
+                self.save()
+                self.log("Đã thêm quái: " + ", ".join(added))
+                self.refresh_monsters()
+            top.destroy()
+
+        btns = ttk.Frame(top)
+        btns.grid(row=len(rows) + 1, column=0, columnspan=3, pady=8)
+        ttk.Button(btns, text="Thêm vào danh sách", command=add).pack(side="left", padx=4)
+        ttk.Button(btns, text="Đóng", command=top.destroy).pack(side="left", padx=4)
+        # đặt hộp giữa cửa sổ app cho dễ thấy (mặc định Tk đặt ở góc trên-trái màn hình)
+        top.update_idletasks()
+        r = self.root
+        x = r.winfo_rootx() + (r.winfo_width() - top.winfo_reqwidth()) // 2
+        y = r.winfo_rooty() + (r.winfo_height() - top.winfo_reqheight()) // 3
+        top.geometry(f"+{max(0, x)}+{max(0, y)}")
+        top.lift()
+        top.focus_force()
 
     def detect_map(self):
         self.bot.reload()
@@ -413,6 +483,36 @@ class App:
                      f"Mở bảng Kỹ năng trong trận, kéo chọn sát biểu tượng kỹ năng {i}")
         self.refresh_skills()
 
+    def learn_monster(self, map_name, name, level):
+        """Tên + cấp đọc chuẩn từ màn chào trước trận: sửa tên trong danh sách cho đúng dấu
+        (vd 'Heo Tim' -> 'Heo Tím') và điền cấp, giữ nguyên dấu tick."""
+        mons = self.maps.get(map_name or "", {}).get("monsters", [])
+        key = B.norm_text(name).replace(" ", "")
+        best, br = None, 0
+        for mon in mons:
+            r = difflib.SequenceMatcher(None, B.norm_text(mon["name"]).replace(" ", ""), key).ratio()
+            if r > br:
+                best, br = mon, r
+        if not best or br < 0.8:
+            return  # không phải quái trong danh sách (không tự thêm)
+        changed = []
+        if best["name"] != name:
+            if map_name == self.map_var.get():
+                self.collect_auto()  # lưu dấu tick hiện tại trước khi đổi tên
+            sel = self.cfg["auto"].setdefault("selected", {}).get(map_name, [])
+            self.cfg["auto"]["selected"][map_name] = [name if n == best["name"] else n for n in sel]
+            changed.append(f"tên '{best['name']}' -> '{name}'")
+            best["name"] = name
+        old = best.get("level")
+        if level and old != level and not (old and str(old).startswith(str(level))):  # 51 -> 5: bị che 1 số
+            best["level"] = level
+            changed.append(f"cấp {level}")
+        if changed:
+            self.save()
+            if map_name == self.map_var.get():
+                self.refresh_monsters()
+            self.log("  Đã cập nhật danh sách quái: " + ", ".join(changed))
+
     def collect_auto(self):
         a = self.cfg["auto"]
         m = self.map_var.get()
@@ -422,7 +522,7 @@ class App:
         a["use_potion"] = self.pot_var.get()
         a["potion_hp"] = int(self.pot_hp.get())
         a["max_lose_streak"] = int(self.lose_var.get())
-        a["max_minutes"] = int(self.min_var.get())
+        a.pop("max_minutes", None)  # đã bỏ điều kiện dừng theo số phút
         a["max_battles"] = int(self.bat_var.get())
         self.save()
         return m, a["selected"][m]
@@ -759,6 +859,8 @@ class App:
                 kind, m = self.q.get_nowait()
                 if kind == "log":
                     self.log(m)
+                elif kind == "mon":
+                    self.learn_monster(*m)
                 elif kind == "done":
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")

@@ -38,7 +38,28 @@
       {
         "name": "Hỏa hầu",
         "level": null
+      },
+      {
+        "name": "Cá Sấu",
+        "level": null
+      },
+      {
+        "name": "Cóc Tía",
+        "level": null
+      },
+      {
+        "name": "Huyết Lang",
+        "level": null
       }
     ]
+  },
+  "Cửu Phong": {
+    "monsters": [
+      {
+        "name": "Thỏ Hồng",
+        "level": null
+      }
+    ],
+    "ladder": "ladders/cuu_phong.png"
   }
 }

@@ -9,6 +9,7 @@ import json
 import unicodedata
 import os
 import random
+import re
 import threading
 import time
 
@@ -266,6 +267,33 @@ class GameWindow:
 
 
 # =================================================================== tìm ảnh mẫu
+# Nút tròn đặt trên nền map / nền trận (đổi theo map và ngày/đêm): chỉ so phần lòng nút,
+# bỏ nền ở góc và dòng chữ bên dưới. (x1, y1, x2, y2) theo tỉ lệ ảnh mẫu.
+TEMPLATE_BOX = {
+    "ui/nut_danh.png": (0.2, 0.2, 0.8, 0.8),
+    "ui/dau_hang.png": (0.2, 0.1, 0.8, 0.65),
+    "ui/tui_do.png": (0.2, 0.1, 0.8, 0.65),
+}
+
+# Ảnh mẫu là chữ in đè lên bàn cờ / nền (nền phía sau mỗi lần một khác): chỉ so phần chữ.
+# Cả ảnh mẫu lẫn màn hình được đổi thành ảnh đen-trắng theo màu chữ rồi mới so.
+# Khung có chữ "Lượt của đối thủ" đạt ~0.87 (ngày lẫn đêm), khung không có chữ <= 0.4.
+TEMPLATE_COLOR = {
+    "ui/luot_doi_thu.png": "red_text",
+}
+
+
+def color_key(img, kind):
+    """Ảnh đen-trắng (float32) chỉ giữ điểm ảnh đúng màu chữ."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    if kind == "red_text":
+        m = ((h < 20) | (h > 165)) & (s > 120) & (v > 150)
+    else:
+        raise ValueError(kind)
+    return m.astype(np.float32)
+
+
 class Templates:
     def __init__(self):
         self.cache = {}
@@ -285,10 +313,20 @@ class Templates:
     def exists(self, rel):
         return self.get(rel) is not None
 
-    def find(self, screen, rel, threshold=0.85, region=None):
+    def find(self, screen, rel, threshold=0.85, region=None, box=None):
+        """box: chỉ so phần (x1, y1, x2, y2) theo tỉ lệ của ảnh mẫu - mặc định lấy ở TEMPLATE_BOX
+        cho các nút tròn (nền quanh nút đổi theo map / ngày đêm nên không so phần nền)."""
         tpl = self.get(rel)
         if tpl is None:
             return None
+        kind = TEMPLATE_COLOR.get(rel)
+        if kind:
+            tpl, screen = color_key(tpl, kind), color_key(screen, kind)
+        box = box or TEMPLATE_BOX.get(rel)
+        if box:
+            h, w = tpl.shape[:2]
+            tpl = tpl[int(h * box[1]):max(int(h * box[1]) + 8, int(h * box[3])),
+                      int(w * box[0]):max(int(w * box[0]) + 8, int(w * box[2]))]
         ox = oy = 0
         if region:
             x1, y1, x2, y2 = region
@@ -321,11 +359,31 @@ class Templates:
 
 
 # =================================================================== đọc chữ (OCR)
+def slug(s):
+    """Tên file không dấu từ tên map, vd 'Hồng Giang' -> 'hong_giang'."""
+    s = unicodedata.normalize("NFD", s.replace("đ", "d").replace("Đ", "D"))
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
+    return "".join(c if c.isalnum() else "_" for c in s).strip("_") or "x"
+
+
 def norm_text(s):
     """Bỏ dấu, chữ thường, chỉ giữ chữ/số -> so sánh tên không phụ thuộc dấu."""
     s = unicodedata.normalize("NFD", (s or "").replace("đ", "d").replace("Đ", "D"))
     s = "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
     return " ".join("".join(c if c.isalnum() else " " for c in s).split())
+
+
+# Chữ trắng (tên quái) gần như không có màu; bầu trời xanh nhạt (vd map Hồng Giang) có độ bão hoà ~70-100
+OCR_WHITE_S = 70
+# Tên nhân vật màu xanh ngọc đậm (bão hoà 150-255); trời xanh ngọc nhạt chỉ ~70-100 -> phải lọc chặt
+OCR_CYAN_S, OCR_CYAN_V = 140, 170
+
+
+def cyan_mask(hsv, cfg):
+    """Điểm ảnh màu xanh ngọc của tên nhân vật mình."""
+    return ((hsv[..., 0] >= 78) & (hsv[..., 0] <= 100) &
+            (hsv[..., 1] > cfg.get("ocr_cyan_s", OCR_CYAN_S)) &
+            (hsv[..., 2] > cfg.get("ocr_cyan_v", OCR_CYAN_V)))
 
 
 class OCR:
@@ -368,10 +426,9 @@ class OCR:
         scale = cfg.get("ocr_scale", 3)
         hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
         white = ((hsv[..., 2] > cfg.get("ocr_white_v", 185)) &
-                 (hsv[..., 1] < cfg.get("ocr_white_s", 70)))
+                 (hsv[..., 1] < cfg.get("ocr_white_s", OCR_WHITE_S)))
         # tên nhân vật của mình hiện màu xanh ngọc (cyan), không phải trắng
-        cyan = (hsv[..., 0] >= 78) & (hsv[..., 0] <= 100) & (hsv[..., 1] > 60) & (hsv[..., 2] > 130)
-        white = (white | cyan).astype(np.uint8) * 255
+        white = (white | cyan_mask(hsv, cfg)).astype(np.uint8) * 255
         img = 255 - cv2.resize(white, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         d = self.pt.image_to_data(img, lang=self.lang, config="--psm 11",
                                   output_type=self.pt.Output.DICT)
@@ -541,19 +598,79 @@ def all_swaps(R, C):
                 yield (r, c), (r + 1, c)
 
 
-def best_raw(grid, priority, extra_len):
+def _makes_match(g, r, c):
+    """Ô (r, c) có nằm trong hàng/cột 3 viên giống nhau không (chỉ xét quanh ô này - nhanh)."""
+    v = g[r][c]
+    if v is None:
+        return False
+    R, C = len(g), len(g[0])
+    n, x = 1, c - 1
+    while x >= 0 and g[r][x] == v:
+        n, x = n + 1, x - 1
+    x = c + 1
+    while x < C and g[r][x] == v:
+        n, x = n + 1, x + 1
+    if n >= 3:
+        return True
+    n, y = 1, r - 1
+    while y >= 0 and g[y][c] == v:
+        n, y = n + 1, y - 1
+    y = r + 1
+    while y < R and g[y][c] == v:
+        n, y = n + 1, y + 1
+    return n >= 3
+
+
+def valid_moves(grid, exclude=()):
+    """Các nước đổi chỗ ăn được ít nhất 3 viên (bỏ qua ô chưa biết và các nước trong exclude)."""
     R, C = len(grid), len(grid[0])
-    best = 0.0
+    g = [row[:] for row in grid]
+    out = []
     for (r1, c1), (r2, c2) in all_swaps(R, C):
-        a, b = grid[r1][c1], grid[r2][c2]
-        if a is None or b is None or a == b:
+        a, b = g[r1][c1], g[r2][c2]
+        if a is None or b is None or a == b or ((r1, c1), (r2, c2)) in exclude:
             continue
-        g = [row[:] for row in grid]
         g[r1][c1], g[r2][c2] = b, a
-        s, extra, _ = simulate(g, priority, extra_len)
-        if extra:
-            s += 80
-        best = max(best, s)
+        if _makes_match(g, r1, c1) or _makes_match(g, r2, c2):
+            out.append(((r1, c1), (r2, c2)))
+        g[r1][c1], g[r2][c2] = a, b
+    return out
+
+
+def _play(grid, move, priority, extra_len, extra_bonus, special=None):
+    """Đi thử 1 nước -> (điểm ngay, được thêm lượt?, bàn cờ sau khi rơi, cụm lớn nhất ăn ngay)."""
+    (r1, c1), (r2, c2) = move
+    g = [row[:] for row in grid]
+    g[r1][c1], g[r2][c2] = g[r2][c2], g[r1][c1]
+    sp = None
+    if special:  # viên đặc biệt đi theo ô bị đổi chỗ
+        swap = {(r1, c1): (r2, c2), (r2, c2): (r1, c1)}
+        sp = {swap.get(pos, pos): v for pos, v in special.items()}
+    big = max((n for n, _ in find_matches(g)[1]), default=0)
+    s, extra, after = simulate(g, priority, extra_len, sp)
+    if extra:
+        s += extra_bonus
+    return s, extra, after, big
+
+
+def _search(grid, depth, mine, priority, extra_len, extra_bonus, opp_weight, discount, beam):
+    """Giá trị (theo phía bot) của bàn cờ khi tới lượt `mine` (True = bot, False = đối thủ),
+    tính trước `depth` nước. Viên mới rơi xuống là ô chưa biết nên chỉ dùng các viên đã thấy.
+    Trả về (giá trị, [(nước, của_bot?, được_thêm_lượt?), ...])."""
+    if depth <= 0:
+        return 0.0, []
+    tries = [(m,) + _play(grid, m, priority, extra_len, extra_bonus)[:3] for m in valid_moves(grid)]
+    if not tries:
+        return 0.0, []
+    tries.sort(key=lambda t: -t[1])
+    best = None
+    for m, s, extra, after in tries[:beam]:
+        nxt = mine if extra else not mine  # ăn 4+ -> đi tiếp, không thì tới lượt bên kia
+        f, line = _search(after, depth - 1, nxt, priority, extra_len, extra_bonus,
+                          opp_weight, discount, beam)
+        v = (s if mine else -opp_weight * s) + discount * f
+        if best is None or (v > best[0] if mine else v < best[0]):
+            best = (v, [(m, mine, extra)] + line)
     return best
 
 
@@ -561,41 +678,68 @@ def best_raw(grid, priority, extra_len):
 TIER_BONUS = {5: 20000, 4: 10000}
 
 
-def best_move(grid, priority=None, extra_len=4, extra_bonus=80, look_ahead=0.4, exclude=(),
-              special=None):
-    """Chọn nước đi: ưu tiên ăn 4+ (được thêm lượt), trừ điểm nếu để lại nước ngon cho đối thủ.
-    exclude: các nước (ô1, ô2) đã bị game từ chối trên bàn cờ này -> bỏ qua.
-    special: {(r, c): điểm cộng} cho viên đặc biệt (vd kiếm đỏ)."""
-    special = special or {}
-    priority = priority or {}
-    R, C = len(grid), len(grid[0])
-    best, best_s = None, 0.0
-    for (r1, c1), (r2, c2) in all_swaps(R, C):
-        if ((r1, c1), (r2, c2)) in exclude:
-            continue
+def move_info(grid, exclude=()):
+    """{nước: (số viên của cụm lớn nhất ăn được ngay, {các loại viên bị ăn ngay})} cho mọi nước hợp lệ."""
+    out = {}
+    for (r1, c1), (r2, c2) in all_swaps(len(grid), len(grid[0])):
         a, b = grid[r1][c1], grid[r2][c2]
-        if a is None or b is None or a == b:
+        if a is None or b is None or a == b or ((r1, c1), (r2, c2)) in exclude:
             continue
         g = [row[:] for row in grid]
         g[r1][c1], g[r2][c2] = b, a
-        sp = None
-        if special:  # viên đặc biệt đi theo ô bị đổi chỗ
-            swap = {(r1, c1): (r2, c2), (r2, c2): (r1, c1)}
-            sp = {swap.get(pos, pos): v for pos, v in special.items()}
-        s, extra, after = simulate(g, priority, extra_len, sp)
+        runs = find_matches(g)[1]
+        if runs:
+            out[((r1, c1), (r2, c2))] = (max(n for n, _ in runs), {k for _, k in runs})
+    return out
+
+
+def move_sizes(grid, exclude=()):
+    """{nước: số viên của cụm lớn nhất ăn được ngay} - để ghi log/kiểm tra."""
+    return {m: n for m, (n, _) in move_info(grid, exclude).items()}
+
+
+# Máu thấp: vẫn đi nước này trước khi uống bình nếu ăn được 4+ hoặc ăn được loại viên này
+URGENT_GEMS = ("kiem",)
+
+
+def urgent_moves(grid, exclude=(), gems=URGENT_GEMS):
+    """Các nước 'đáng đi trước khi uống bình': ăn 4+ hoặc ăn được kiếm (kiếm đỏ lưu là kiếm)."""
+    return {m for m, (n, kinds) in move_info(grid, exclude).items() if n >= 4 or kinds & set(gems)}
+
+
+def plan_text(plan):
+    """Chuỗi nước dự tính -> chữ để ghi log, vd "bot (1,2)-(1,3) +lượt → bot ... → đối thủ ..."."""
+    parts = []
+    for ((r1, c1), (r2, c2)), mine, extra in plan:
+        parts.append(f"{'bot' if mine else 'đối thủ'} ({r1 + 1},{c1 + 1})-({r2 + 1},{c2 + 1})"
+                     + (" +lượt" if extra else ""))
+    return " → ".join(parts)
+
+
+def best_move(grid, priority=None, extra_len=4, extra_bonus=80, look_ahead=0.5, exclude=(),
+              special=None, depth=3, discount=0.8, beam=6, with_plan=False):
+    """Chọn nước đi, tính trước `depth` nước (nước này + các nước sau của 2 bên).
+    - Ăn 4+ được thêm lượt -> tính tiếp nước sau của bot; không thì tính nước đáp trả của đối thủ
+      (trừ look_ahead x điểm của đối thủ) rồi tới bot.
+    - Nước càng xa càng nhân thêm `discount` (viên mới rơi chưa biết nên kém chắc chắn hơn).
+    - Ở các nước sau chỉ xét `beam` nước điểm cao nhất cho nhanh.
+    - Luôn xếp theo tầng trước: nước ăn 5 > ăn 4 > ăn 3 (chỉ tính cụm ăn ngay bằng nước này).
+    exclude: các nước (ô1, ô2) đã bị game từ chối trên bàn cờ này -> bỏ qua.
+    special: {(r, c): điểm cộng} cho viên đặc biệt (vd kiếm đỏ).
+    with_plan=True -> trả thêm chuỗi nước dự tính [(nước, của_bot?, được_thêm_lượt?), ...]."""
+    special = special or {}
+    priority = priority or {}
+    best, best_s, plan = None, 0.0, []
+    for m in valid_moves(grid, exclude):
+        s, extra, after, big = _play(grid, m, priority, extra_len, extra_bonus, special)
         if s <= 0:
             continue
-        if extra:
-            s += extra_bonus
-        elif look_ahead:
-            s -= look_ahead * best_raw(after, priority, extra_len)
-        # Luôn ưu tiên nước ăn 5+ rồi 4, sau đó mới tới thứ tự ưu tiên viên.
-        # Chỉ tính cụm ăn được ngay bằng nước này (viên rơi xuống sau đó chưa biết trước).
-        big = max((n for n, _ in find_matches(g)[1]), default=0)
-        s += TIER_BONUS.get(min(big, 5), 0)
+        f, line = _search(after, depth - 1, extra, priority, extra_len, extra_bonus,
+                          look_ahead, discount, beam)
+        s += discount * f + TIER_BONUS.get(min(big, 5), 0)
         if best is None or s > best_s:
-            best, best_s = ((r1, c1), (r2, c2)), s
-    return best, best_s
+            best, best_s, plan = m, s, [(m, True, extra)] + line
+    return (best, best_s, plan) if with_plan else (best, best_s)
 
 
 # =================================================================== bot
@@ -742,13 +886,14 @@ class Bot:
                     sc_row.append(0.0)
                     continue
                 ch = gem_hist(core)
-                scores = []
+                scores, shapes = [], {}
                 for name, t in gems.items():
                     if cell.shape[0] < t.shape[0] or cell.shape[1] < t.shape[1]:
                         t = cv2.resize(t, (max(1, cell.shape[1] - 2), max(1, cell.shape[0] - 2)))
                     shape = cv2.minMaxLoc(cv2.matchTemplate(cell, t, cv2.TM_CCOEFF_NORMED))[1]
                     color = cv2.compareHist(ch, hists[name], cv2.HISTCMP_CORREL)
                     scores.append((0.5 * shape + 0.5 * color, name))
+                    shapes[name] = shape
                 scores.sort(reverse=True)
                 top, top_name = scores[0]
                 base = alias.get(top_name, top_name)
@@ -756,6 +901,14 @@ class Bot:
                 second = next((v for v, n in scores[1:] if alias.get(n, n) != base), -1)
                 # không chắc chắn (giống 2 loại gần bằng nhau) -> coi như không biết, không ghép ô này
                 ok = top >= gth and top - second >= margin
+                if not ok:
+                    # Màu lệch (nền trời sáng xuyên qua ô; viên tim hồng nằm ở chỗ thang màu quay vòng)
+                    # nhưng hình dạng khớp rất chắc và hơn hẳn loại khác -> vẫn nhận
+                    s_name = max(shapes, key=shapes.get)
+                    s_base = alias.get(s_name, s_name)
+                    s_second = max((v for n, v in shapes.items() if alias.get(n, n) != s_base), default=-1)
+                    if shapes[s_name] >= b.get("gem_shape_sure", 0.85) and                             shapes[s_name] - s_second >= b.get("gem_shape_margin", 0.2):
+                        ok, top_name, base = True, s_name, s_base
                 out.append(base if ok else None)
                 if ok and top_name != base:
                     self.board_special[(len(grid), len(out) - 1)] = top_name
@@ -858,15 +1011,32 @@ class Bot:
         (x1, y1), (x2, y2) = b["top_left"], b["bottom_right"]
         return screen[y1:y2, x1:x2]
 
-    def stable_screen(self, tries=6):
-        """Chờ bàn cờ đứng yên (hết hiệu ứng rơi viên)."""
+    def board_motion(self, a, b):
+        """Độ thay đổi lớn nhất của một ô giữa 2 ảnh bàn cờ. Lấy trung bình cả bàn thì 3-4 viên
+        đang rơi bị 'pha loãng' -> tưởng bàn cờ đã đứng yên, đi nước khi viên mới chưa rơi xong."""
+        if not a.size or a.shape != b.shape:
+            return 999.0
+        b_ = self.cfg["board"]
+        R, C = b_["rows"], b_["cols"]
+        d = cv2.cvtColor(cv2.absdiff(a, b), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        d = cv2.resize(d, (C, R), interpolation=cv2.INTER_AREA)  # trung bình theo từng ô
+        return float(d.max())
+
+    def stable_screen(self, tries=10):
+        """Chờ bàn cờ đứng yên (hết hiệu ứng rơi viên): không ô nào thay đổi rõ, 2 lần liên tiếp."""
+        # con trỏ chuột lướt qua 1 ô ~7-13; viên đang rơi / đổi chỗ ~50+
+        th = self.cfg["board"].get("still_cell_diff", 20)
         prev = self.win.grab()
+        calm = 0
         for _ in range(tries):
-            self.sleep(0.25, 0.3)
+            self.sleep(0.2, 0.25)
             cur = self.win.grab()
-            a, b = self.board_crop(prev), self.board_crop(cur)
-            if a.size and a.shape == b.shape and float(np.mean(cv2.absdiff(a, b))) < 2.5:
-                return cur
+            if self.board_motion(self.board_crop(prev), self.board_crop(cur)) < th:
+                calm += 1
+                if calm >= 2:
+                    return cur
+            else:
+                calm = 0
             prev = cur
         return None
 
@@ -885,6 +1055,12 @@ class Bot:
             time.sleep(random.uniform(0.1, 0.2))
             pyautogui.moveTo(x2, y2, duration=random.uniform(0.08, 0.16))
             pyautogui.click()
+        # đưa chuột ra dưới bàn cờ (chỉ di, không bấm): con trỏ đè lên viên làm đọc sai / tưởng còn động
+        b = self.cfg["board"]
+        (bx1, _), (bx2, by2) = b["top_left"], b["bottom_right"]
+        h = self.win.size()[1] if self.win.size() else by2 + 40
+        pyautogui.moveTo(*self.win.to_screen((bx1 + bx2) // 2, min(by2 + 35, h - 10)),
+                         duration=random.uniform(0.05, 0.1))
 
     # ---------------------------------------------------------- thanh máu / nội lực
     @staticmethod
@@ -920,6 +1096,31 @@ class Bot:
                     break
         return (end + 1) / (x2 - x1)
 
+    def hp_fill(self, screen):
+        """Tỉ lệ máu. Đọc số "349/543" in trên thanh máu (chính xác ở cả theme ngày/đêm);
+        không đọc được thì đo phần màu đỏ (dòng số đè lên giữa thanh nên kém chính xác hơn
+        - chỉ đúng khi máu dưới khoảng 1/3)."""
+        rect = self.cfg.get("hp_bar")
+        if not rect or rect[2] <= rect[0]:
+            return None
+        if self.ocr.ok is None:
+            self.ocr.setup(self.cfg)
+        if self.ocr.ok:
+            x1, y1, x2, y2 = rect
+            crop = screen[max(0, y1 - 2):y2 + 2, x1:x2]
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            big = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+            _, bw = cv2.threshold(big, 200, 255, cv2.THRESH_BINARY_INV)  # chữ số trắng
+            try:
+                t = self.ocr.pt.image_to_string(
+                    bw, config="--psm 7 -c tessedit_char_whitelist=0123456789/")
+            except Exception:
+                t = ""
+            m = re.search(r"(\d+)\s*/\s*(\d+)", t)
+            if m and 0 < int(m.group(2)) and int(m.group(1)) <= int(m.group(2)):
+                return int(m.group(1)) / int(m.group(2))
+        return self.bar_fill(screen, rect, "red")
+
     # ---------------------------------------------------------- trong trận
     def in_battle(self, screen):
         return bool(self.tpl.find(screen, "ui/dau_hang.png", self.th))
@@ -954,14 +1155,41 @@ class Bot:
             self.log(f"[!] Không thấy kỹ năng {idx}")
             key_press("esc")
 
+    def turn_clock(self):
+        """(số giây đã trôi trong lượt của bot, đang gấp?, sắp hết giờ?).
+        Mỗi lượt chỉ có `turn_limit_s` giây (mặc định 30), quá giờ là mất lượt."""
+        now = time.time()
+        if now - getattr(self, "_last_tick", 0) > 5:  # trận mới / vừa quay lại trận
+            self._turn_start = None
+        self._last_tick = now
+        start = getattr(self, "_turn_start", None)
+        el = now - start if start else 0.0
+        limit = self.cfg.get("turn_limit_s", 30)
+        return el, el >= limit * 0.5, el >= limit * 0.75
+
     def battle_turn(self):
         cfg = self.cfg
-        screen = self.stable_screen()
-        if screen is None or not self.in_battle(screen):
+        elapsed, hurry, panic = self.turn_clock()
+        if panic:  # sắp hết giờ: không chờ bàn cờ đứng yên nữa
+            screen = self.win.grab()
+        else:
+            screen = self.stable_screen(4 if hurry else 10)
+        if screen is None:
+            # có viên nhấp nháy mãi -> không bao giờ "đứng yên" hẳn: sau vài lần chờ vẫn đi
+            self._unstable = getattr(self, "_unstable", 0) + 1
+            if self._unstable < (1 if hurry else 3):
+                return
+            screen = self.win.grab()
+        self._unstable = 0
+        if not self.in_battle(screen):
             return
-        if self.tpl.find(screen, "ui/luot_doi_thu.png", self.th):
+        if self.tpl.find(screen, "ui/luot_doi_thu.png", self.cfg.get("opponent_threshold", 0.6)):
+            self._turn_start = None  # lượt đối thủ: đồng hồ của bot bắt đầu lại khi tới lượt mình
             self.sleep(0.6)
             return
+        if self._turn_start is None:
+            self._turn_start = time.time()
+            elapsed, hurry, panic = self.turn_clock()
         if not getattr(self, "_calibrated", False) and not self.board_problem(screen):
             self._calibrated = True
             old = [list(self.cfg["board"]["top_left"]), list(self.cfg["board"]["bottom_right"])]
@@ -972,40 +1200,95 @@ class Bot:
         grid = self.read_board(screen)
         if grid is None:
             self.log("[!] " + (self.board_problem(screen) or "Chưa lấy mẫu các viên"))
-            self.sleep(2)
+            self.sleep(0.5 if hurry else 2)
             return
         known = sum(v is not None for row in grid for v in row)
-        if known < len(grid) * len(grid[0]) * 0.8:
+        total = len(grid) * len(grid[0])
+        if known < total * (0.5 if panic else 0.8):
             self.sleep(0.4)  # bàn cờ đang tối / có chữ đè -> chưa tới lượt
             return
+        if known < total and not hurry:
+            # còn ô chưa đọc được (thường là viên đang rơi) -> chờ, kẻo bỏ sót nước ăn 4/5.
+            # Ô lạ mãi không hết (viên chưa có ảnh mẫu) thì sau ~2 giây vẫn đi.
+            first = getattr(self, "_unknown_since", None) or time.time()
+            self._unknown_since = first
+            if time.time() - first < cfg["board"].get("wait_unknown_s", 2.0):
+                self.sleep(0.3)
+                return
+        self._unknown_since = None
+
+        key = tuple(map(tuple, grid))
+        if getattr(self, "_bad_grid", None) != key:
+            self._bad_grid, self._bad_moves = key, set()
+        pri, ext = cfg.get("gem_priority", {}), cfg.get("extra_turn_len", 4)
+        special = special_bonus(cfg, self.board_special)
+        depth = cfg.get("search_depth", 3)
+
+        def solve(exclude):
+            return best_move(grid, pri, ext, exclude=exclude, special=special, depth=depth,
+                             with_plan=True)
+        move, score, plan = solve(self._bad_moves)
+
+        def pick_urgent():
+            """Nước tốt nhất trong các nước ăn 4+ / ăn kiếm (None nếu không có)."""
+            urgent = urgent_moves(grid, self._bad_moves)
+            if not urgent:
+                return None
+            if move in urgent:
+                return move, plan
+            others = {m for m in move_info(grid, self._bad_moves) if m not in urgent}
+            m, _, p = solve(set(self._bad_moves) | others)
+            return (m, p) if m else None
 
         ui = cfg["auto"]
-        hp = self.bar_fill(screen, cfg.get("hp_bar"), "red")
+        eat_first = False  # máu thấp nhưng có nước ăn 4+/ăn kiếm -> đi nước đó ngay lượt này
+        hp = self.hp_fill(screen)
         if ui.get("use_potion") and hp is not None and hp * 100 < ui.get("potion_hp", 30) \
                 and time.time() - getattr(self, "_last_potion", 0) > 8:
-            if self.use_potion():
+            # Máu thấp: chưa vào túi đồ vội. Có nước ăn 4+ hoặc ăn kiếm thì ăn trước.
+            urgent_move = pick_urgent()
+            if urgent_move:
+                (move, plan), eat_first = urgent_move, True
+                self.log(f"  HP còn ~{hp * 100:.0f}%: có nước ăn 4+ / ăn kiếm, ăn trước rồi mới uống bình")
+            elif self.use_potion():
                 self._last_potion = time.time()
                 self.log(f"  HP còn ~{hp * 100:.0f}%")
                 return
             # không mở được túi đồ (nút mờ / không thấy) -> vẫn đi nước bình thường
         sk = ui.get("skill", 0)
-        if sk:
+        if sk and not eat_first:
             en = self.bar_fill(screen, cfg.get("energy_bar"), cfg.get("energy_color", "any"))
             if en is not None and en >= energy_need(cfg) \
                     and time.time() - getattr(self, "_last_skill", 0) > 5:
-                self._last_skill = time.time()
-                self.use_skill(sk)
-                return
+                # Đủ nội lực: chưa dùng kỹ năng vội. Có nước ăn 4+ hoặc ăn kiếm thì ăn trước.
+                urgent_move = pick_urgent()
+                if urgent_move:
+                    move, plan = urgent_move
+                    self.log("  Đủ nội lực nhưng có nước ăn 4+ / ăn kiếm, ăn trước rồi mới dùng kỹ năng")
+                else:
+                    self._last_skill = time.time()
+                    self.use_skill(sk)
+                    return
 
-        key = tuple(map(tuple, grid))
-        if getattr(self, "_bad_grid", None) != key:
-            self._bad_grid, self._bad_moves = key, set()
-        move, score = best_move(grid, cfg.get("gem_priority", {}), cfg.get("extra_turn_len", 4),
-                                exclude=self._bad_moves,
-                                special=special_bonus(cfg, self.board_special))
+        if not move and panic:
+            # sắp mất lượt mà không thấy nước chắc chắn: thử đổi 1 viên chưa đọc được với ô bên cạnh
+            cands = [m for m in all_swaps(len(grid), len(grid[0]))
+                     if (grid[m[0][0]][m[0][1]] is None) != (grid[m[1][0]][m[1][1]] is None)
+                     and m not in self._bad_moves]
+            if cands:
+                move, plan = random.choice(cands), []
+                self.log(f"[!] Lượt đã {elapsed:.0f} giây, sắp hết giờ: thử nước {move} với ô chưa đọc được")
         if not move:
-            self.sleep(0.5)
+            self.sleep(0.3 if hurry else 0.5)
             return
+        sizes = move_sizes(grid, self._bad_moves)
+        n4 = sum(1 for v in sizes.values() if v >= 4)
+        unk = sum(v is None for row in grid for v in row)
+        self.log(f"  Nước {move}: ăn {sizes.get(move, '?')}"
+                 f" | bàn có {n4} nước ăn 4+" + (f" | {unk} ô chưa đọc được" if unk else "")
+                 + (f" | lượt đã {elapsed:.0f} giây" if elapsed >= 10 else ""))
+        if len(plan) > 1:
+            self.log("    tính trước: " + plan_text(plan))
         before = self.board_crop(screen).copy()
         self.do_move(move)
         # nước sai: game đổi 2 viên rồi trả lại -> sau ~1 giây bàn cờ y như cũ
@@ -1017,6 +1300,7 @@ class Bot:
             self.log(f"[!] Nước {move} không ăn được (bot đọc nhầm viên?). Đã lưu ảnh: "
                      f"{os.path.relpath(path, BASE) if path else '-'}")
         else:
+            self._turn_start = time.time()  # được thêm lượt -> tính lại giờ (an toàn)
             self.sleep(cfg.get("delay_after_move", 1.0))
 
     # ---------------------------------------------------------- trên map
@@ -1061,23 +1345,34 @@ class Bot:
                     if i >= 0 and len(text) > len(target):
                         cx = x1 + (x2 - x1) * (i + len(target) / 2) / len(text)
                         hits.append((int(cx), (y1 + y2) // 2, 0.9))
-        hits = [h for h in hits if not (h[0] < W * 0.3 and h[1] < H * 0.15)]
-        if hits:
-            me = max(hits, key=lambda h: h[1])[:2]
-        else:
+        me = self.pick_me([h[:2] for h in hits], W, H)
+        if not me:
             me = self.cyan_name_pos(screen, len(norm_text(name).replace(" ", "")))
         if me:
             self._last_me = (me, time.time())
         return me
+
+    def pick_me(self, cands, W, H):
+        """Chọn vị trí tên nhân vật hợp lý trong các ứng viên.
+        Camera đi theo nhân vật nên tên mình luôn ở quanh giữa màn hình và không nhảy xa giữa
+        2 lần đọc: bỏ chỗ ở dải giao diện trên/dưới và chỗ cách vị trí vừa thấy quá xa."""
+        cands = [p for p in cands if H * 0.12 <= p[1] <= H * 0.88]
+        ref, t = getattr(self, "_last_me", (None, 0))
+        age = time.time() - t
+        if ref and age <= 4:
+            cands = [p for p in cands if abs(p[0] - ref[0]) + abs(p[1] - ref[1]) <= 250]
+        if not ref or age > 30:
+            ref = (W // 2, int(H * 0.45))
+        return min(cands, key=lambda p: abs(p[0] - ref[0]) + abs(p[1] - ref[1])) if cands else None
 
     def cyan_name_pos(self, screen, n_chars):
         """Dự phòng khi OCR đọc sai tên (bị chồng chữ với người khác): tên mình là dòng chữ
         màu xanh ngọc duy nhất, tên người khác màu trắng. Tìm cụm chữ cyan dài cỡ tên mình."""
         H, W = screen.shape[:2]
         hsv = cv2.cvtColor(screen, cv2.COLOR_BGR2HSV)
-        m = ((hsv[..., 0] >= 78) & (hsv[..., 0] <= 100) & (hsv[..., 1] > 60) &
-             (hsv[..., 2] > 130)).astype(np.uint8) * 255
-        m[:int(H * 0.15), :int(W * 0.3)] = 0  # khung thông tin góc trên-trái
+        m = cyan_mask(hsv, self.cfg).astype(np.uint8) * 255
+        m[:int(H * 0.12), :] = 0  # dải giao diện phía trên (khung thông tin, tên map, nút)
+        m[:int(H * 0.15), :int(W * 0.3)] = 0
         m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3)))
         n, _, st, _ = cv2.connectedComponentsWithStats(m)
         cands = []
@@ -1085,13 +1380,8 @@ class Bot:
             x, y, w, h, a = st[i]
             if n_chars * 6 <= w <= n_chars * 13 + 10 and 8 <= h <= 22 and a >= 0.45 * w * h:
                 cands.append((int(x + w / 2), int(y + h / 2)))
-        if not cands:
-            return None
         # camera đi theo nhân vật: ưu tiên chỗ vừa thấy nhân vật, không có thì gần giữa màn hình
-        ref, t = getattr(self, "_last_me", (None, 0))
-        if not ref or time.time() - t > 30:
-            ref = (W // 2, int(H * 0.45))
-        return min(cands, key=lambda p: abs(p[0] - ref[0]) + abs(p[1] - ref[1]))
+        return self.pick_me(cands, W, H)
 
     def recent_player_pos(self, seconds=4):
         """Vị trí nhân vật đọc được gần nhất (nếu chưa quá 'seconds' giây) - dùng khi tên bị che."""
@@ -1156,20 +1446,26 @@ class Bot:
             return
         pos, t = getattr(self, "_atk", (None, 0))
         if pos is None or time.time() - t > 30:
-            found = self.tpl.find(self.win.grab(), "ui/nut_danh.png", 0.7)
+            # nút tròn nằm trên nền map (mỗi map một màu) -> chỉ so phần giữa nút
+            found = self.tpl.find(self.win.grab(), "ui/nut_danh.png", 0.75)
             pos = found[:2] if found else None
             self._atk = (pos, time.time())
+            if not pos and time.time() - getattr(self, "_atk_warn", 0) > 30:
+                self._atk_warn = time.time()
+                self.log("[!] Không thấy nút Đánh trên màn hình (chụp lại ảnh 'nut_danh' ở tab Cài đặt?)")
         if pos:
             self.click(pos[0], pos[1], jitter=2)
 
-    def nearest_target(self, screen, map_name, selected, band=None):
+    def nearest_target(self, screen, map_name, selected, band=None, prefer=None):
         """Trả về (quái gần nhất, vị trí nhân vật). Toạ độ là tâm dòng tên trên đầu.
-        band: chỉ đọc chữ trong dải ngang này; không thấy đủ thì đọc lại cả màn hình."""
+        band: chỉ đọc chữ trong dải ngang này; không thấy đủ thì đọc lại cả màn hình.
+        prefer: (dx, dy) của con đang đuổi so với nhân vật ở lần đọc trước -> bám tiếp con đó
+        (không đổi sang con khác giữa đường, kẻo lúc đi trái lúc đi phải)."""
         words = self.read_words(screen, band)
         found = self.targets(screen, map_name, selected, words)
         me = self.player_pos(screen, words)
         if band and not (found and me):
-            return self.nearest_target(screen, map_name, selected)
+            return self.nearest_target(screen, map_name, selected, prefer=prefer)
         # bỏ những con vừa bấm đánh mà không vào trận (thường là đang bị người khác đánh)
         now = time.time()
         self._skip = [k for k in getattr(self, "_skip", []) if k[2] > now]
@@ -1177,7 +1473,16 @@ class Bot:
                  if not any(abs(f[0] - k[0]) < 60 and abs(f[1] - k[1]) < 40 for k in self._skip)]
         if me:  # bỏ trường hợp đọc nhầm chính tên mình
             found = [f for f in found if abs(f[0] - me[0]) + abs(f[1] - me[1]) > 10]
-            found.sort(key=lambda t: abs(t[0] - me[0]) + 2 * abs(t[1] - me[1]))
+            level_y = self.cfg["move"].get("same_level_px", 60)
+            # quái cùng tầng luôn được chọn trước quái ở tầng khác (phải leo thang / nhảy, hay hỏng)
+            found.sort(key=lambda t: abs(t[0] - me[0]) + 2 * abs(t[1] - me[1]) +
+                       (0 if abs(t[1] - me[1]) <= level_y else 1000))
+            if prefer:
+                same = [f for f in found if f[2] == prefer[2]
+                        and abs(f[0] - me[0] - prefer[0]) <= 150 and abs(f[1] - me[1] - prefer[1]) <= 50]
+                if same:
+                    return min(same, key=lambda f: abs(f[0] - me[0] - prefer[0]) +
+                               2 * abs(f[1] - me[1] - prefer[1])), me
         return (found[0] if found else None), me
 
     def engage(self, screen, map_name, selected):
@@ -1207,6 +1512,7 @@ class Bot:
         direction = 1 if target[0] >= me[0] else -1  # hướng đi tìm mép khi cần rơi xuống
         searching_edge = False
         stuck = 0
+        misses = 0  # số lần liền đọc trượt tên quái
         for _ in range(mv.get("max_steps", 25)):
             x, y = target[0], target[1]
             dx, dy = x - me[0], y - me[1]
@@ -1226,7 +1532,7 @@ class Bot:
                     return True
             else:
                 vkey = mv.get("key_down", "down") if dy > 0 else mv.get("key_up", "up")
-                ladder = self.find_ladder(screen, me, target)
+                ladder = self.find_ladder(screen, me, target, map_name)
                 if ladder and abs(ladder[0] - me[0]) > 15:
                     # Cách 1: có thang -> đi tới thang
                     self.log(f"  Quái ở tầng {'dưới' if dy > 0 else 'trên'}, đi tới thang")
@@ -1267,15 +1573,25 @@ class Bot:
                 return True
             prev, last = me, target
             band = (me[1] - 150, me[1] + 150) if abs(dy) <= level_y else None
-            target, me = self.nearest_target(screen, map_name, selected, band)
+            prefer = (last[0] - prev[0], last[1] - prev[1], last[2])
+            target, me = self.nearest_target(screen, map_name, selected, band, prefer)
             if not target:
                 ldx = last[0] - prev[0]
                 if abs(ldx) <= near_x * 2 and abs(last[1] - prev[1]) <= level_y:
                     # đứng sát quái thì tên 2 bên đè lên nhau, OCR hay đọc trượt -> cứ lao tới đánh
                     self.log("  Mất dấu quái ở gần (tên bị đè), lao tới và bấm đánh")
                     return self.charge(1 if ldx > 0 else -1, last)
-                self.log("  Không còn thấy quái trên màn hình")
-                return False
+                misses += 1
+                if misses > mv.get("max_misses", 2):
+                    self.log("  Không còn thấy quái trên màn hình")
+                    return False
+                # OCR hay đọc trượt 1-2 lần: coi quái vẫn ở chỗ vừa thấy, đi tiếp về phía đó
+                self.log("  Tạm không đọc được tên quái, đi tiếp về chỗ vừa thấy")
+                base = me or prev
+                target, me = (base[0] + prefer[0], base[1] + prefer[1], last[2], 0.0), base
+                stuck = 0
+                continue
+            misses = 0
             if not me:
                 self.log("  Không thấy tên nhân vật (bị che?), dùng vị trí cũ")
                 me = prev
@@ -1347,9 +1663,18 @@ class Bot:
             key_up(key)
         return False
 
-    def find_ladder(self, screen, me, target):
-        """Thang gần nhân vật nhất nằm giữa tầng của nhân vật và tầng của quái (cần ảnh mẫu ui/thang.png)."""
-        ladders = self.tpl.find_all(screen, "ui/thang.png", self.cfg.get("ladder_threshold", 0.7))
+    def ladder_tpl(self, map_name):
+        """Ảnh mẫu thang của map (mỗi map một kiểu thang). Map chưa chụp -> dùng ui/thang.png.
+        Một ảnh dùng được cho cả theme ngày lẫn đêm (thang có ~0.8-1.0, chỗ không có thang ~0.3)."""
+        rel = self.maps.get(map_name or "", {}).get("ladder")
+        if rel and self.tpl.exists(rel):
+            return rel
+        rel = f"ladders/{slug(map_name)}.png" if map_name else None  # file đặt sẵn theo tên map
+        return rel if rel and self.tpl.exists(rel) else "ui/thang.png"
+
+    def find_ladder(self, screen, me, target, map_name=None):
+        """Thang gần nhân vật nhất nằm giữa tầng của nhân vật và tầng của quái."""
+        ladders = self.tpl.find_all(screen, self.ladder_tpl(map_name), self.cfg.get("ladder_threshold", 0.7))
         lo, hi = min(me[1], target[1]) - 40, max(me[1], target[1]) + 80
         ladders = [lad for lad in ladders if lo <= lad[1] <= hi]
         return min(ladders, key=lambda lad: abs(lad[0] - me[0])) if ladders else None

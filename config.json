@@ -8,12 +8,12 @@
   "extra_turn_len": 4,
   "board": {
     "top_left": [
-      417,
-      166
+      415,
+      167
     ],
     "bottom_right": [
-      864,
-      613
+      862,
+      614
     ],
     "rows": 8,
     "cols": 8,
@@ -62,20 +62,23 @@
     "speed_px_per_s": 250
   },
   "auto": {
-    "map": "Hồng Giang",
+    "map": "Cửu Phong",
     "selected": {
       "Trại Vân Sơn": [
         "Cua Càng"
       ],
       "Hồng Giang": [
-        "Hỏa hầu"
+        "Huyết Lang"
+      ],
+      "Cửu Phong": [
+        "Thỏ Hồng"
       ]
     },
     "skill": 1,
     "use_potion": true,
     "potion_hp": 30,
-    "max_lose_streak": 2,
-    "max_minutes": 120,
+    "max_lose_streak": 5,
+    "max_minutes": 480,
     "max_battles": 0
   },
   "player_name": "phucdd",

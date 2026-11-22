@@ -33,14 +33,11 @@ UI_TEMPLATES = [
     ("tui_do.png", "Nút 'Túi đồ' trong trận", False),
     ("binh_mau.png", "Bình máu trong túi đồ (không cần nữa)", False),
     ("luot_doi_thu.png", "Chữ 'Lượt của đối thủ'", False),
-    ("thang.png", "Một đoạn cầu thang trên map (để leo lên/xuống tầng)", False),
+    ("thang.png", "Thang dùng chung khi map chưa chụp thang riêng (nút 'Chụp thang' ở tab Tự động)", False),
 ]
 
 
-def slug(s):
-    s = unicodedata.normalize("NFD", s.replace("đ", "d").replace("Đ", "D"))
-    s = "".join(c for c in s if unicodedata.category(c) != "Mn").lower()
-    return "".join(c if c.isalnum() else "_" for c in s).strip("_") or "x"
+slug = B.slug
 
 
 # =================================================================== chọn vùng trên màn hình
@@ -208,6 +205,10 @@ class App:
         self.map_cb.bind("<<ComboboxSelected>>", lambda e: self.refresh_monsters())
         ttk.Button(row, text="Nhận diện", command=self.detect_map).pack(side="left")
         ttk.Button(row, text="+ Map", width=6, command=self.add_map).pack(side="left", padx=2)
+        # mỗi map một kiểu thang (gỗ, dây...) -> ảnh mẫu thang lưu riêng cho từng map
+        ttk.Button(row, text="Chụp thang", command=self.capture_ladder).pack(side="left", padx=2)
+        self.ladder_lbl = ttk.Label(row, text="")
+        self.ladder_lbl.pack(side="left", padx=2)
 
         hdr = ttk.Frame(f)
         hdr.pack(fill="x", pady=(8, 0))
@@ -276,7 +277,27 @@ class App:
         self.logbox = tk.Text(f, height=9, state="disabled", font=("Consolas", 9))
         self.logbox.pack(fill="both", expand=True, pady=(6, 0))
 
+    def capture_ladder(self):
+        """Chụp thang của map đang chọn (mỗi map một kiểu thang). Một ảnh dùng được cả ngày lẫn đêm."""
+        m = self.map_var.get()
+        if not m:
+            self.log("[!] Chọn bản đồ trước khi chụp thang")
+            return
+        rel = f"ladders/{slug(m)}.png"
+        if self.capture(rel, f"Kéo chọn sát một đoạn thang của map '{m}' "
+                             "(khoảng 4-6 bậc, cắt sát 2 bên dây/thanh thang)"):
+            self.maps.setdefault(m, {"monsters": []})["ladder"] = rel
+            self.save()
+            self.update_ladder_label()
+
+    def update_ladder_label(self):
+        m = self.map_var.get()
+        has = self.bot.ladder_tpl(m) != "ui/thang.png"
+        self.ladder_lbl.config(text="thang: ✔" if has else "thang: chưa chụp",
+                               foreground="green" if has else "gray")
+
     def refresh_monsters(self):
+        self.update_ladder_label()
         for w in self.mon_frame.winfo_children():
             w.destroy()
         m = self.map_var.get()
@@ -551,6 +572,33 @@ class App:
         sp.bind("<FocusOut>", set_need)
         ttk.Label(g, text="26 = hết khúc đầu; 100 = đầy thanh", foreground="gray").grid(
             row=3, column=0, columnspan=4, sticky="w")
+        ttk.Label(g, text="Tính trước bao nhiêu nước:").grid(row=4, column=0, columnspan=2, sticky="w")
+        self.depth_var = depth = tk.IntVar(value=int(self.cfg.get("search_depth", 3)))
+
+        def set_depth(*_):
+            try:
+                self._set(self.cfg, "search_depth", max(1, min(4, int(depth.get()))))
+            except (tk.TclError, ValueError):
+                pass
+        sp = ttk.Spinbox(g, from_=1, to=4, width=4, textvariable=depth, command=set_depth)
+        sp.grid(row=4, column=2, sticky="w")
+        sp.bind("<FocusOut>", set_depth)
+        ttk.Label(g, text="1 = chỉ nhìn nước hiện tại; 3 = nên dùng; 4 = kỹ hơn nhưng chậm hơn",
+                  foreground="gray").grid(row=5, column=0, columnspan=4, sticky="w")
+        ttk.Label(g, text="Thời gian mỗi lượt của game (giây):").grid(row=6, column=0, columnspan=2,
+                                                                    sticky="w")
+        self.limit_var = limit = tk.IntVar(value=int(self.cfg.get("turn_limit_s", 30)))
+
+        def set_limit(*_):
+            try:
+                self._set(self.cfg, "turn_limit_s", max(5, min(120, int(limit.get()))))
+            except (tk.TclError, ValueError):
+                pass
+        sp = ttk.Spinbox(g, from_=5, to=120, width=4, textvariable=limit, command=set_limit)
+        sp.grid(row=6, column=2, sticky="w")
+        sp.bind("<FocusOut>", set_limit)
+        ttk.Label(g, text="Quá nửa thời gian bot thôi chờ; quá 3/4 bot đi ngay nước tìm được",
+                  foreground="gray").grid(row=7, column=0, columnspan=4, sticky="w")
 
         # nút giao diện
         g = ttk.LabelFrame(f, text="4. Ảnh mẫu các nút (cắt sát nút)", padding=6)
@@ -689,13 +737,16 @@ class App:
         unk = sum(v is None for row in grid for v in row)
         if unk:
             self.log(f"[!] {unk} ô không nhận ra (ô đặc biệt hoặc cần lấy mẫu lại)")
-        mv, sc = B.best_move(grid, self.cfg.get("gem_priority", {}), self.cfg.get("extra_turn_len", 4),
-                             special=B.special_bonus(self.cfg, self.bot.board_special))
+        mv, sc, plan = B.best_move(grid, self.cfg.get("gem_priority", {}), self.cfg.get("extra_turn_len", 4),
+                                   special=B.special_bonus(self.cfg, self.bot.board_special),
+                                   depth=self.cfg.get("search_depth", 3), with_plan=True)
         if self.bot.board_special:
             self.log("Viên đặc biệt: " + ", ".join(f"{n} ở hàng {r + 1} cột {c + 1}"
                                                   for (r, c), n in self.bot.board_special.items()))
         self.log(f"Nước đi gợi ý: {mv} (điểm {sc:.0f})")
-        hp = self.bot.bar_fill(s, self.cfg.get("hp_bar"), "red")
+        if len(plan) > 1:
+            self.log("Tính trước: " + B.plan_text(plan))
+        hp = self.bot.hp_fill(s)
         en = self.bot.bar_fill(s, self.cfg.get("energy_bar"), self.cfg.get("energy_color", "green"))
         self.log(f"HP ~ {hp * 100:.0f}%" if hp is not None else "HP: chưa chọn thanh máu")
         self.log(f"Nội lực ~ {en * 100:.0f}%" if en is not None else "Nội lực: chưa chọn thanh")

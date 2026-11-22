@@ -53,6 +53,17 @@ Mỗi lần bấm **Chụp** hoặc **Chọn**, màn hình sẽ đứng hình đ
 - Không nhận ra map: bot đọc riêng ô tên map ở góc trên-phải (25% bên phải, 12% phía trên). Nếu giao diện khác, thêm `"map_region": [x1, y1, x2, y2]` (toạ độ trong cửa sổ game) vào `config.json`.
 - Nếu bot hay nhận nhầm tên quái này thành quái khác, tăng `name_match` (0.72 → 0.8).
 
+## Thang leo
+Mỗi map có một kiểu thang riêng (thang gỗ, thang dây...). Khi đứng ở map mới, chọn map đó ở tab **Tự động** rồi bấm **Chụp thang**, kéo chọn sát một đoạn thang khoảng 4–6 bậc. Bên cạnh nút sẽ hiện "thang: ✔" khi map đã có ảnh thang. Một ảnh dùng được cho cả ban ngày lẫn ban đêm. Map Hồng Giang đã có sẵn.
+
+## Theme ngày / đêm
+Game đổi theme ban ngày / ban đêm theo giờ thật. Bot đã được chỉnh để chạy được cả hai:
+- Các nút tròn (Đánh, Đầu hàng, Túi đồ): bot chỉ so phần lòng nút, không so nền quanh nút.
+- Chữ "Lượt của đối thủ": bot chỉ so phần chữ đỏ, không so các viên cờ phía sau.
+- Thanh máu: bot đọc dòng số (vd 349/543) trên thanh.
+- Tên nhân vật màu xanh ngọc: lọc chặt để không lẫn với bầu trời ban ngày (`ocr_cyan_s`, `ocr_cyan_v` trong `config.json`).
+Khi chụp lại ảnh mẫu, nên cắt sát nút, đừng lấy nhiều nền xung quanh. Nếu thấy bot chỉ hỏng vào một buổi (ngày hoặc đêm), hãy quay video gửi lại.
+
 ## Lưu ý
 - Game có sẵn tính năng "Tự động" nhưng giới hạn số giờ mỗi ngày. Chạy bot ngoài là vi phạm điều khoản của game và có thể bị khoá tài khoản.
 - Chỉ dùng cho đánh quái (PvE), không dùng cho PvP.
